@@ -26,6 +26,10 @@
 #define ENC_B 20      //ky-040 dt  pin, add 100nF/0.1uF capacitors between pin & ground!!!
 #define BUTTONENC 22  //ky-040 sw  pin, add 100nF/0.1uF capacitors between pin & ground!!!
 
+#define IVG116_DISPLAY_HEIGHT 7
+#define IVG116_DISPLAY_WIDTH 111
+#define BLANK_COL 0b11111111
+
 PIO pio = pio0;
 uint offset, sm;
 int scroll = 0;     // position of whatever is on the display, so this is the compass heading or text scroll
@@ -39,15 +43,15 @@ enum Mode  // this is for the menu system
 };
 Mode mode = SCROLLING_TEXT;
 
-char displayText[500] = { "pIGV1-16\0 " };  //this is where you put text to display (from wifi or serial or whatever) terminated with \0
-int invertedChars[500];                     // put 1 in locations where you want text to be knockout
-unsigned char displayBuffer[3000];          //this is where the actual bitmap is loaded to be shown on the display
+char displayText[500] = { "pIGV1-16\0 " };  // this is where you put text to display (from wifi or serial or whatever) terminated with \0
+bool invertedChars[500];                    // put 1 in locations where you want text to be knockout
+unsigned char displayBuffer[3000];          // this is where the actual bitmap is loaded to be shown on the display
 
-//scrolling text stuff
+// scrolling text stuff
 int charsInDisplay = 0;
 const int numChars = 600;
 char receivedChars[numChars];  // an array to store the received data
-int scrollSpeed = 30;          //number of millisecods to wait before moving 1 pixel
+int scrollSpeed = 30;          // number of millisecods to wait before moving 1 pixel
 unsigned long timeLast = 0;
 int scrollCharPosition;
 
@@ -190,7 +194,6 @@ void loop() {
 
   scrollSpeed = encoder_value;
 
-
   if (digitalRead(BUTTONENC) == 0) {
     scrollFlag = !scrollFlag;
     encoderOffset = encoderRaw;
@@ -266,19 +269,18 @@ void loadDisplayBuffer(void) {  //this fills displayBuffer[] with data depending
       break;
 
     case Mode::SCROLLING_TEXT:  //scrolling text
-      bool endFlag = false;
       int bufferPosition = 0;
+      bool endFlag = false;
       bool foundEndingFlag = false;
 
       for (int i = 0; i < sizeof(displayBuffer); i += 6) {
         if (displayText[(i / 6)] == '\0' && !foundEndingFlag) {
           foundEndingFlag = true;
           charsInDisplay = (i / 6) + 1;
-          //bufferPosition = 0;
         }
 
-        if ((bufferPosition / 6) > charsInDisplay)  //this makes it fill the entire buffer with repeated copies of displayText[]
-        {                                           //if speed is an issue you can change this loop to not waste so many cycles
+        if (bufferPosition / 6 > charsInDisplay)  //this makes it fill the entire buffer with repeated copies of displayText[]
+        {                                         //if speed is an issue you can change this loop to not waste so many cycles
           endFlag = true;
           bufferPosition = -6;
         } else {
@@ -286,29 +288,28 @@ void loadDisplayBuffer(void) {  //this fills displayBuffer[] with data depending
         }
 
         for (int j = 0; j < 6; j++) {
-          if (!endFlag) {
-            int letterInt = displayText[bufferPosition / 6] - 32;
+          if (endFlag) {
+            displayBuffer[i + j] = BLANK_COL;
+            continue;
+          }
 
-            if (letterInt > 92 || letterInt < 0)
-              letterInt = 0;
+          int letterInt = displayText[bufferPosition / 6] - 32;
+          if (letterInt > 92 || letterInt < 0)
+            letterInt = 0;
 
-
-            if (invertedChars[i / 6] == 1) {  // for inverted charachters
-              if (j == 0) {
-                displayBuffer[i + j - 1] = 0b00000000;
-              }
-              if (j < 5) {
-                displayBuffer[i + j] = charBitmaps[letterInt][j];
-              } else {
-                displayBuffer[bufferPosition + j] = 0b00000000;
-              }
-            } else {  //non inverted characters
-              displayBuffer[i + j] = j < 5
-                                       ? ~charBitmaps[letterInt][j]
-                                       : 0b11111111;
+          if (invertedChars[i / 6]) {  // for inverted charachters
+            if (j == 0) {
+              displayBuffer[i + j - 1] = ~BLANK_COL;
             }
-          } else {
-            displayBuffer[i + j] = 0b11111111;
+            if (j < 5) {
+              displayBuffer[i + j] = CHAR_BITMAPS[letterInt][j];
+            } else {
+              displayBuffer[bufferPosition + j] = !BLANK_COL;
+            }
+          } else {  //non inverted characters
+            displayBuffer[i + j] = j < 5
+                                     ? ~CHAR_BITMAPS[letterInt][j]
+                                     : BLANK_COL;
           }
         }
 
@@ -318,20 +319,17 @@ void loadDisplayBuffer(void) {  //this fills displayBuffer[] with data depending
   }
 }
 
-
-
 void writeNeon(void) {  //this function writes data to the display
   digitalWrite(BLANK, LOW);
   delayMicroseconds(10);
 
   if (Mode::SCROLLING_TEXT) {
     scroll = scroll2;
-  }
-  else {
+  } else {
     // TODO
   }
 
-  for (int i = scroll; i < (111 + scroll); i++) {
+  for (int i = scroll; i < scroll + IVG116_DISPLAY_WIDTH; i++) {
 
     digitalWrite(ROW0, HIGH);  //pull display anodes low (~100V) while dealing with the scan cathodes
     digitalWrite(ROW1, HIGH);
@@ -341,8 +339,7 @@ void writeNeon(void) {  //this function writes data to the display
     digitalWrite(ROW5, HIGH);
     digitalWrite(ROW6, HIGH);
 
-    scanLocation++;
-    if (scanLocation >= 3) scanLocation = 0;
+    scanLocation = (scanLocation + 1) % 3;
 
     if (scanLocation == 0) {
 
@@ -381,15 +378,15 @@ void writeNeon(void) {  //this function writes data to the display
 
     delayMicroseconds(brightness);  //give the plasma time to cook
 
-    digitalWrite(ROW0, HIGH);  //pull all anodes low for the next cylcle
-    digitalWrite(ROW1, HIGH);  //I know this is basically running twice in a row but
-    digitalWrite(ROW2, HIGH);  //for some reason the display is more stable
-    digitalWrite(ROW3, HIGH);  //when I add this
+    digitalWrite(ROW0, HIGH);  // pull all anodes low for the next cycle
+    digitalWrite(ROW1, HIGH);  // I know this is basically running twice in a row but
+    digitalWrite(ROW2, HIGH);  // for some reason the display is more stable
+    digitalWrite(ROW3, HIGH);  // when I add this
     digitalWrite(ROW4, HIGH);
     digitalWrite(ROW5, HIGH);
     digitalWrite(ROW6, HIGH);
   }
-  //interrupts();
+
   scanLocation = -1;  //-1 so it doesnt scan on the first time though the loop
 
   digitalWrite(ROW0, HIGH);
@@ -400,17 +397,11 @@ void writeNeon(void) {  //this function writes data to the display
   digitalWrite(ROW5, HIGH);
   digitalWrite(ROW6, HIGH);
 
-
   digitalWrite(SCAN1, LOW);
   digitalWrite(SCAN2, LOW);
   digitalWrite(SCAN3, LOW);
 
   digitalWrite(BLANK, HIGH);  //BLANKing pulse (left on until the next time through this function)
 
-
-  //scanLocation = 0;
   delayMicroseconds(25);
-
-
-  //digitalWrite(BLANK, LOW);
 }

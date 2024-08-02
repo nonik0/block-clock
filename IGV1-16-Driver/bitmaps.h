@@ -26,8 +26,8 @@ unsigned char compass[]{
 }; //360
 
 
-
-const unsigned char charBitmaps[][5] = 
+const unsigned char CHAR_WIDTH = 5;
+const unsigned char CHAR_BITMAPS[][CHAR_WIDTH] = 
 {
     {
   0b00000000, //         
@@ -635,7 +635,7 @@ const unsigned char charBitmaps[][5] =
 };
 
 
-const unsigned char charBitmapsInverted[][5] = 
+const unsigned char CHAR_BITMAPSInverted[][5] = 
 {
     {
 	0b11111111, //         
