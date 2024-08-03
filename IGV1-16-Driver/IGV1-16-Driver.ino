@@ -43,8 +43,9 @@ enum Mode  // this is for the menu system
 };
 Mode mode = SCROLLING_TEXT;
 
-char displayText[500] = { "pIGV1-16\0 " };  // this is where you put text to display (from wifi or serial or whatever) terminated with \0
-bool invertedChars[500];                    // put 1 in locations where you want text to be knockout
+const int DISPLAY_TEXT_SIZE = 500;
+char displayText[DISPLAY_TEXT_SIZE] = { "pIGV1-16\0 " };  // this is where you put text to display (from wifi or serial or whatever) terminated with \0
+bool invertedChars[DISPLAY_TEXT_SIZE];                    // put 1 in locations where you want text to be knockout
 unsigned char displayBuffer[3000];          // this is where the actual bitmap is loaded to be shown on the display
 
 // scrolling text stuff
@@ -66,7 +67,6 @@ volatile bool pressed = 0;
 int lastPosition = 0;
 int oldPos = 0;
 
-boolean newData = false;
 volatile int encoder_value = 0;
 int encoderOffset = 0;
 int encoderRaw = 0;
@@ -184,7 +184,6 @@ void setup() {
 void loop() {
   server.handleClient();
   recvWithEndMarker();
-  showNewData();
 
   // Serial.println(scrollSpeed);
   pio_sm_exec_wait_blocking(pio, sm, pio_encode_in(pio_x, 32));
@@ -203,25 +202,11 @@ void loop() {
 }
 
 void recvWithEndMarker() {
-  static int ndx = 10;
-  char endMarker = '\n';
-  char rc;
-
-  if (server.hasArg("hello") > 0 && newData == false) {
+  if (server.hasArg("hello") > 0) {
     String webBuffer = server.arg("hello");
-    strncpy(displayText, webBuffer.c_str(), 500);
-  }
-  //scroll2 = 50;
-}
-
-void showNewData() {
-  if (newData == true) {
-    Serial.print("This just in ... ");
-    Serial.println(displayText);
-    newData = false;
+    strncpy(displayText, webBuffer.c_str(), DISPLAY_TEXT_SIZE);
   }
 }
-
 
 void setup1() {
   pinMode(SCAN1, OUTPUT_8MA);
@@ -360,21 +345,13 @@ void writeNeon(void) {  //this function writes data to the display
       digitalWrite(SCAN2, LOW);
     }
 
-    unsigned char row;
-
-    if (mode == Mode::SCROLLING_TEXT) {
-      row = displayBuffer[i];  //for scrolling text we can show more than 360 pixels in the display buffer
-    } else {
-      row = displayBuffer[i % 360];  //for the compass we're only interested in the first 360 of the displayBuffer
-    }
-
-    digitalWrite(ROW0, row & 0b01000000);  //displays one column of data on the scan anodes
-    digitalWrite(ROW1, row & 0b00100000);
-    digitalWrite(ROW2, row & 0b00010000);
-    digitalWrite(ROW3, row & 0b00001000);
-    digitalWrite(ROW4, row & 0b00000100);
-    digitalWrite(ROW5, row & 0b00000010);
-    digitalWrite(ROW6, row & 0b00000001);
+    digitalWrite(ROW0, displayBuffer[i] & 0b01000000);  //displays one column of data on the scan anodes
+    digitalWrite(ROW1, displayBuffer[i] & 0b00100000);
+    digitalWrite(ROW2, displayBuffer[i] & 0b00010000);
+    digitalWrite(ROW3, displayBuffer[i] & 0b00001000);
+    digitalWrite(ROW4, displayBuffer[i] & 0b00000100);
+    digitalWrite(ROW5, displayBuffer[i] & 0b00000010);
+    digitalWrite(ROW6, displayBuffer[i] & 0b00000001);
 
     delayMicroseconds(brightness);  //give the plasma time to cook
 
@@ -387,7 +364,7 @@ void writeNeon(void) {  //this function writes data to the display
     digitalWrite(ROW6, HIGH);
   }
 
-  scanLocation = -1;  //-1 so it doesnt scan on the first time though the loop
+  scanLocation = -1;  // -1 so it doesnt scan on the first time though the loop
 
   digitalWrite(ROW0, HIGH);
   digitalWrite(ROW1, HIGH);
@@ -401,7 +378,7 @@ void writeNeon(void) {  //this function writes data to the display
   digitalWrite(SCAN2, LOW);
   digitalWrite(SCAN3, LOW);
 
-  digitalWrite(BLANK, HIGH);  //BLANKing pulse (left on until the next time through this function)
+  digitalWrite(BLANK, HIGH);  // BLANKing pulse (left on until the next time through this function)
 
   delayMicroseconds(25);
 }
