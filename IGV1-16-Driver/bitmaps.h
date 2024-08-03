@@ -27,6 +27,7 @@ unsigned char compass[]{
 
 
 const unsigned char CHAR_WIDTH = 5;
+const unsigned char CHAR_SPACING = CHAR_WIDTH + 1;
 const unsigned char CHAR_BITMAPS[][CHAR_WIDTH] = 
 {
     {

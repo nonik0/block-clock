@@ -254,51 +254,43 @@ void loadDisplayBuffer(void) {  //this fills displayBuffer[] with data depending
       break;
 
     case Mode::SCROLLING_TEXT:  //scrolling text
-      int bufferPosition = 0;
+      int bufIdx = 0
+      int textIdx = 0;
       bool endFlag = false;
       bool foundEndingFlag = false;
 
-      for (int i = 0; i < sizeof(displayBuffer); i += 6) {
-        if (displayText[(i / 6)] == '\0' && !foundEndingFlag) {
+      while (bufIdx < sizeof(displayBuffer)) {
+        if (displayText[textIdx] == '\0' && !foundEndingFlag) {
           foundEndingFlag = true;
-          charsInDisplay = (i / 6) + 1;
+          charsInDisplay = textIdx + 1;
         }
 
-        if (bufferPosition / 6 > charsInDisplay)  //this makes it fill the entire buffer with repeated copies of displayText[]
-        {                                         //if speed is an issue you can change this loop to not waste so many cycles
-          endFlag = true;
-          bufferPosition = -6;
+        if (textIdx > charsInDisplay) { // this makes it fill the entire buffer with repeated copies of displayText[]            
+          endFlag = true;                                   // if speed is an issue you can change this loop to not waste so many cycles
+          textIdx = -1;
         } else {
           endFlag = false;
         }
 
-        for (int j = 0; j < 6; j++) {
+        for (int charIdx = 0; charIdx < CHAR_WIDTH; charIdx++) {
           if (endFlag) {
-            displayBuffer[i + j] = BLANK_COL;
+            displayBuffer[bufIdx + charIdx] = BLANK_COL;
             continue;
           }
 
-          int letterInt = displayText[bufferPosition / 6] - 32;
-          if (letterInt > 92 || letterInt < 0)
-            letterInt = 0;
+          int letterIndex = displayText[textIdx] - 32; //' ';
+          if (letterIndex > 92 || letterIndex < 0)
+            letterIndex = 0;
 
-          if (invertedChars[i / 6]) {  // for inverted charachters
-            if (j == 0) {
-              displayBuffer[i + j - 1] = ~BLANK_COL;
-            }
-            if (j < 5) {
-              displayBuffer[i + j] = CHAR_BITMAPS[letterInt][j];
-            } else {
-              displayBuffer[bufferPosition + j] = !BLANK_COL;
-            }
-          } else {  //non inverted characters
-            displayBuffer[i + j] = j < 5
-                                     ? ~CHAR_BITMAPS[letterInt][j]
-                                     : BLANK_COL;
-          }
+          displayBuffer[bufIdx + charIdx] = ~CHAR_BITMAPS[letterIndex][charIdx];
         }
 
-        bufferPosition += 6;
+        for (spaceIdx = 0; spaceIdx < CHAR_SPACING-CHAR_WIDTH; spaceIdx++) {
+          displayBuffer[bufIdx + CHAR_WIDTH + spaceIdx] = BLANK_COL;
+        }
+
+        bufIdx += CHAR_SPACING;
+        textIdx += 1;
       }
       break;
   }
