@@ -32,27 +32,33 @@
 
 PIO pio = pio0;
 uint offset, sm;
+
+bool scrollFlag = true;
 int scroll = 0;     // position of whatever is on the display, so this is the compass heading or text scroll
-int scroll2 = 112;  // used to increment scroll for text scrolling (this value here is the start point)
+int scroll2 = IVG116_DISPLAY_WIDTH + 1;  // used to increment scroll for text scrolling (this value here is the start point)
 
 enum Mode  // this is for the menu system
 {
-  COMPASS,
-  MENU,
+  BLINKENLIGHTS,
   SCROLLING_TEXT
 };
-Mode mode = SCROLLING_TEXT;
+Mode mode = BLINKENLIGHTS;
 
 const int DISPLAY_TEXT_SIZE = 500;
 char displayText[DISPLAY_TEXT_SIZE] = { "pIGV1-16\0 " };        // this is where you put text to display (from wifi or serial or whatever) terminated with \0
 bool invertedChars[DISPLAY_TEXT_SIZE];                          // put 1 in locations where you want text to be knockout
 unsigned char displayBuffer[DISPLAY_TEXT_SIZE * CHAR_SPACING];  // this is where the actual bitmap is loaded to be shown on the display
 
+// blinkenlights stuff
+const int BLINKENLIGHTS_BASE_DELAY = 100;                              // this is how long each pixel stays on
+bool pixelsActive[IVG116_DISPLAY_WIDTH][IVG116_DISPLAY_HEIGHT];  // this is the bitmap for the blinkenlights
+unsigned long pixelsDelay[IVG116_DISPLAY_WIDTH][IVG116_DISPLAY_HEIGHT];   // this is the delay for the blinkenlights
+
 // scrolling text stuff
 int charsInDisplay = sizeof(displayText) / sizeof(displayText[0]);
 const int RECV_CHAR_MAX = 600;
 char receivedChars[RECV_CHAR_MAX];  // an array to store the received data
-int scrollSpeed = 45;               // number of millisecods to wait before moving 1 pixel
+int scrollSpeed = 30;               // number of millisecods to wait before moving 1 pixel
 unsigned long timeLast = 0;
 
 int scanLocation = -1;  // keeps track of where we are in the cathode scanning sequence (-1 keeps it from scanning the first cycle)
@@ -61,8 +67,6 @@ int brightness = 110;   // number of microseconds to hold on each column of the 
 volatile int encoder_value = 0;
 int encoderOffset = 0;
 int encoderRaw = 0;
-
-bool scrollFlag = true;
 
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASS;
@@ -198,6 +202,15 @@ void setup1() {
   pinMode(ROW6, OUTPUT_8MA);
 
   pinMode(BLANK, OUTPUT_8MA);
+
+  // initialize blinkenlights
+  for (int col = 0; col < IVG116_DISPLAY_WIDTH; col++) {
+    for (int row = 0; row < IVG116_DISPLAY_HEIGHT; row++) {
+      pixelsActive[col][row] = random(0, 2);
+      //pixelsDelay[col][row] = millis() + random(BLINKENLIGHTS_BASE_DELAY * 4, BLINKENLIGHTS_BASE_DELAY * 8);
+      pixelsDelay[col][row] = random(BLINKENLIGHTS_BASE_DELAY * 4, BLINKENLIGHTS_BASE_DELAY * 8);
+    }
+  }
 }
 
 void loop1() {
@@ -217,68 +230,32 @@ void loop1() {
   }
 
   loadDisplayBuffer();
-  writeNeon();
+  writeDisplay();
 }
 
 
 void loadDisplayBuffer(void) {  //this fills displayBuffer[] with data depending on the menu
   switch (mode) {
-    case Mode::COMPASS:  //compass
+    case Mode::BLINKENLIGHTS:  //compass
+      for (int col = 0; col < IVG116_DISPLAY_WIDTH; col++) {
+        unsigned char colBits = 0b00000000;
+        for (int row = 0; row < IVG116_DISPLAY_HEIGHT; row++) {
+          //if (pixelsDelay[col][row] - millis() < 0) {
+          if (pixelsDelay[col][row]-- <= 0) {
+            pixelsActive[col][row] = !pixelsActive[col][row];
+            //pixelsDelay[col][row] = millis() + random(BLINKENLIGHTS_BASE_DELAY, BLINKENLIGHTS_BASE_DELAY * 2);
+            pixelsDelay[col][row] = random(BLINKENLIGHTS_BASE_DELAY, BLINKENLIGHTS_BASE_DELAY * 2);
+          }
+
+          colBits |= pixelsActive[col][row] << row;
+        }
+
+        displayBuffer[col] = ~colBits;
+      }
+
+      // TODO: better way to limit refresh rate
+      delay(10);
       break;
-
-    case Mode::MENU:  //compass menu
-      break;
-
-      // how does this old code work when charsInDisplays initial value is 0?? Should only loop once.
-      // case Mode::SCROLLING_TEXT:  //scrolling text
-      //   int bufferPosition = 0;
-      //   bool endFlag = false;
-      //   bool foundEndingFlag = false;
-
-      //   for (int i = 0; i < sizeof(displayBuffer); i += 6) {
-      //     if (displayText[(i / 6)] == '\0' && !foundEndingFlag) {
-      //       foundEndingFlag = true;
-      //       charsInDisplay = (i / 6) + 1;
-      //     }
-
-      //     if (bufferPosition / 6 > charsInDisplay)  //this makes it fill the entire buffer with repeated copies of displayText[]
-      //     {                                         //if speed is an issue you can change this loop to not waste so many cycles
-      //       endFlag = true;
-      //       bufferPosition = -6;
-      //     } else {
-      //       endFlag = false;
-      //     }
-
-      //     for (int j = 0; j < 6; j++) {
-      //       if (endFlag) {
-      //         displayBuffer[i + j] = BLANK_COL;
-      //         continue;
-      //       }
-
-      //       int letterInt = displayText[bufferPosition / 6] - 32;
-      //       if (letterInt > 92 || letterInt < 0)
-      //         letterInt = 0;
-
-      //       if (invertedChars[i / 6]) {  // for inverted charachters
-      //         if (j == 0) {
-      //           displayBuffer[i + j - 1] = ~BLANK_COL;
-      //         }
-      //         if (j < 5) {
-      //           displayBuffer[i + j] = CHAR_BITMAPS[letterInt][j];
-      //         } else {
-      //           displayBuffer[bufferPosition + j] = !BLANK_COL;
-      //         }
-      //       } else {  //non inverted characters
-      //         displayBuffer[i + j] = j < 5
-      //                                  ? ~CHAR_BITMAPS[letterInt][j]
-      //                                  : BLANK_COL;
-      //       }
-      //     }
-
-      //     bufferPosition += 6;
-      //   }
-      //   break;
-
 
     case Mode::SCROLLING_TEXT:  //scrolling text
       int bufIdx = 0;
@@ -323,11 +300,13 @@ void loadDisplayBuffer(void) {  //this fills displayBuffer[] with data depending
   }
 }
 
-void writeNeon(void) {  //this function writes data to the display
+void writeDisplay(void) {  //this function writes data to the display
   digitalWrite(BLANK, LOW);
   delayMicroseconds(10);
 
-  if (Mode::SCROLLING_TEXT) {
+  if (mode == Mode::BLINKENLIGHTS) {
+    scroll = 0;
+  } else if (mode == Mode::SCROLLING_TEXT) {
     scroll = scroll2;
   } else {
     // TODO
