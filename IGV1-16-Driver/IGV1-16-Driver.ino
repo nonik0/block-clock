@@ -1,8 +1,8 @@
+#include <string.h>
+#include <LEAmDNS.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WebServer.h>
-#include <LEAmDNS.h>
-#include <string.h>
 
 #include "bitmaps.h"
 #include "secrets.h"
@@ -30,23 +30,26 @@
 #define IVG116_DISPLAY_WIDTH 111
 #define BLANK_COL 0b11111111
 
-PIO pio = pio0;
-uint offset, sm;
+enum DeviceType {
+  IGV1_16,
+  GIPS_16_1
+};
 
-bool scrollFlag = true;
-int scroll = 0;     // position of whatever is on the display, so this is the compass heading or text scroll
-int scroll2 = IVG116_DISPLAY_WIDTH + 1;  // used to increment scroll for text scrolling (this value here is the start point)
-
-enum Mode  // this is for the menu system
-{
+enum Mode {
   BLINKENLIGHTS,
   SCROLLING_TEXT
 };
-Mode mode = BLINKENLIGHTS;
+
+DeviceType deviceType = IGV1_16;
+Mode mode = SCROLLING_TEXT;
+PIO pio = pio0;
+uint offset, sm;
+bool scrollFlag = true;
+int displayOffset = 0;     // position of whatever is on the display, so this is the compass heading or text scroll
+int scrollOffset = IVG116_DISPLAY_WIDTH + 1;  // used to increment scroll for text scrolling (this value here is the start point)
 
 const int DISPLAY_TEXT_SIZE = 500;
-char displayText[DISPLAY_TEXT_SIZE] = { "pIGV1-16\0 " };        // this is where you put text to display (from wifi or serial or whatever) terminated with \0
-bool invertedChars[DISPLAY_TEXT_SIZE];                          // put 1 in locations where you want text to be knockout
+char displayText[DISPLAY_TEXT_SIZE] = { "Stella and Beau\0 " };        // this is where you put text to display (from wifi or serial or whatever) terminated with \0
 unsigned char displayBuffer[DISPLAY_TEXT_SIZE * CHAR_SPACING];  // this is where the actual bitmap is loaded to be shown on the display
 
 // blinkenlights stuff
@@ -165,20 +168,6 @@ void setup() {
 void loop() {
   server.handleClient();
   receiveInput();
-
-  // pio_sm_exec_wait_blocking(pio, sm, pio_encode_in(pio_x, 32));
-
-  // encoderRaw = pio_sm_get_blocking(pio, sm);
-  // encoder_value = encoderRaw - encoderOffset;
-
-  // scrollSpeed = encoder_value;
-
-  // if (digitalRead(BUTTONENC) == 0) {
-  //   scrollFlag = !scrollFlag;
-  //   encoderOffset = encoderRaw;
-  //   encoder_value = 0;
-  //   delay(300);
-  // }
 }
 
 void receiveInput() {
@@ -207,7 +196,6 @@ void setup1() {
   for (int col = 0; col < IVG116_DISPLAY_WIDTH; col++) {
     for (int row = 0; row < IVG116_DISPLAY_HEIGHT; row++) {
       pixelsActive[col][row] = random(0, 2);
-      //pixelsDelay[col][row] = millis() + random(BLINKENLIGHTS_BASE_DELAY * 4, BLINKENLIGHTS_BASE_DELAY * 8);
       pixelsDelay[col][row] = random(BLINKENLIGHTS_BASE_DELAY * 4, BLINKENLIGHTS_BASE_DELAY * 8);
     }
   }
@@ -218,15 +206,15 @@ void loop1() {
 
   if (scrollFlag) {
     if (timeNow - timeLast > scrollSpeed) {
-      scroll2++;
+      scrollOffset++;
 
-      if (scroll2 >= (charsInDisplay * CHAR_SPACING) + (3*CHAR_SPACING)) { // move back scroll position after writing out full display and the 3 char gap
-        scroll2 = CHAR_SPACING;
+      if (scrollOffset >= (charsInDisplay * CHAR_SPACING) + (3*CHAR_SPACING)) { // move back scroll position after writing out full display and the 3 char gap
+        scrollOffset = CHAR_SPACING;
       }
       timeLast = timeNow;
     }
   } else {
-    scroll2 = encoder_value;
+    scrollOffset = encoder_value;
   }
 
   loadDisplayBuffer();
@@ -240,10 +228,8 @@ void loadDisplayBuffer(void) {  //this fills displayBuffer[] with data depending
       for (int col = 0; col < IVG116_DISPLAY_WIDTH; col++) {
         unsigned char colBits = 0b00000000;
         for (int row = 0; row < IVG116_DISPLAY_HEIGHT; row++) {
-          //if (pixelsDelay[col][row] - millis() < 0) {
           if (pixelsDelay[col][row]-- <= 0) {
             pixelsActive[col][row] = !pixelsActive[col][row];
-            //pixelsDelay[col][row] = millis() + random(BLINKENLIGHTS_BASE_DELAY, BLINKENLIGHTS_BASE_DELAY * 2);
             pixelsDelay[col][row] = random(BLINKENLIGHTS_BASE_DELAY, BLINKENLIGHTS_BASE_DELAY * 2);
           }
 
@@ -305,16 +291,23 @@ void writeDisplay(void) {  //this function writes data to the display
   delayMicroseconds(10);
 
   if (mode == Mode::BLINKENLIGHTS) {
-    scroll = 0;
+    displayOffset = 0;
   } else if (mode == Mode::SCROLLING_TEXT) {
-    scroll = scroll2;
+    displayOffset = scrollOffset;
   } else {
     // TODO
   }
 
   // TODO: configuration for direction based on display type
   //for (int i = scroll; i < scroll + IVG116_DISPLAY_WIDTH; i++) {
-  for (int i = scroll + IVG116_DISPLAY_WIDTH - 1; i >= scroll; i--) {
+  //for (int i = displayOffset + IVG116_DISPLAY_WIDTH - 1; i >= displayOffset; i--) {
+  int i = deviceType == IGV1_16 ? displayOffset : displayOffset + IVG116_DISPLAY_WIDTH - 1;
+  while (1) {
+    if (deviceType == IGV1_16) {
+        if (i++ > displayOffset + IVG116_DISPLAY_WIDTH) break;
+    } else if (deviceType == GIPS_16_1) {
+        if (i-- < displayOffset) break;
+    }
 
     digitalWrite(ROW0, HIGH);  //pull display anodes low (~100V) while dealing with the scan cathodes
     digitalWrite(ROW1, HIGH);
