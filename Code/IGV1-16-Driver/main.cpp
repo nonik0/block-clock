@@ -40,8 +40,9 @@ enum Mode
 };
 
 DeviceType deviceType = IGV1_16;
-// bool mirrorVertical = false;
-// bool mirrorHorizontal = false;
+bool displayEnabled = true;
+bool mirrorVertical = false;
+bool mirrorHorizontal = false;
 Mode mode = SCROLLING_TEXT;
 int displayOffset = 0;                                           // position of whatever is on the display, so this is the compass heading or text scroll
 unsigned char displayBuffer[SCROLLING_TEXT_SIZE * CHAR_SPACING]; // this is where the actual bitmap is loaded to be shown on the display
@@ -81,9 +82,60 @@ const String postForms = "<html>\
   </body>\
 </html>";
 
+void receiveInput()
+{
+  if (server.hasArg("message") > 0)
+  {
+    String inputText = server.arg("message");
+    strncpy(scrollText, inputText.c_str(), SCROLLING_TEXT_SIZE);
+
+    Serial.print("Received text: ");
+    Serial.println(scrollText);
+  }
+
+  if (server.hasArg("display"))
+  {
+    String value = server.arg("display");
+    value.toLowerCase();
+
+    if (value == "off" || value == "false")
+    {
+      displayEnabled = false;
+      Serial.println("Display disabled");
+    }
+    else if (value == "on" || value == "true")
+    {
+      displayEnabled = true;
+      Serial.println("Display enabled");
+    }
+  }
+
+  if (server.hasArg("vmirror"))
+  {
+    String value = server.arg("vmirror");
+    value.toLowerCase();
+
+    mirrorVertical = value == "true" ? true : false;
+    Serial.print("Vertical mirror: ");
+    Serial.println(mirrorVertical);
+  }
+
+  if (server.hasArg("hmirror"))
+  {
+    String value = server.arg("hmirror");
+    value.toLowerCase();
+
+    mirrorHorizontal = value == "true" ? true : false;
+    Serial.print("Horizontal mirror: ");
+    Serial.println(mirrorHorizontal);
+  }
+}
+
 void handleRoot()
 {
   server.send(200, "text/html", postForms);
+
+  receiveInput();
 }
 
 void handlePlain()
@@ -96,6 +148,8 @@ void handlePlain()
   {
     server.send(200, "text/plain", "POST body was:\n" + server.arg("plain"));
   }
+
+  receiveInput();
 }
 
 void handleForm()
@@ -113,6 +167,8 @@ void handleForm()
     }
     server.send(200, "text/plain", message);
   }
+
+  receiveInput();
 }
 
 void handleNotFound()
@@ -132,7 +188,7 @@ void handleNotFound()
   server.send(404, "text/plain", message);
 }
 
-void loadDisplayBuffer(void)
+void loadDisplayBuffer()
 { // this fills displayBuffer[] with data depending on the menu
   switch (mode)
   {
@@ -209,17 +265,8 @@ void loadDisplayBuffer(void)
   }
 }
 
-void receiveInput()
+void writeDisplay()
 {
-  if (server.hasArg("message") > 0)
-  {
-    String inputText = server.arg("message");
-    strncpy(scrollText, inputText.c_str(), SCROLLING_TEXT_SIZE);
-  }
-}
-
-void writeDisplay(void)
-{ // this function writes data to the display
   digitalWrite(BLANK, LOW);
   delayMicroseconds(10);
 
@@ -236,23 +283,11 @@ void writeDisplay(void)
     // TODO
   }
 
-  // TODO: configuration for direction based on display type
-  // for (int i = scroll; i < scroll + IVG116_DISPLAY_WIDTH; i++) {
-  // for (int i = displayOffset + IVG116_DISPLAY_WIDTH - 1; i >= displayOffset; i--) {
-  int i = deviceType == IGV1_16 ? displayOffset : displayOffset + IVG116_DISPLAY_WIDTH - 1;
-  while (1)
+  bool scanUp = (deviceType == IGV1_16) ^ mirrorHorizontal;
+  int startIndex = scanUp ? displayOffset : displayOffset + IVG116_DISPLAY_WIDTH - 1;
+  int endIndex = scanUp ? displayOffset + IVG116_DISPLAY_WIDTH + 1 : displayOffset - 1;
+  for (int i = startIndex; i != endIndex; scanUp ? i++ : i--)
   {
-    if (deviceType == IGV1_16)
-    {
-      if (i++ > displayOffset + IVG116_DISPLAY_WIDTH)
-        break;
-    }
-    else if (deviceType == GIPS_16_1)
-    {
-      if (i-- < displayOffset)
-        break;
-    }
-
     digitalWrite(ROW0, HIGH); // pull display anodes low (~100V) while dealing with the scan cathodes
     digitalWrite(ROW1, HIGH);
     digitalWrite(ROW2, HIGH);
@@ -282,13 +317,27 @@ void writeDisplay(void)
       digitalWrite(SCAN2, LOW);
     }
 
-    digitalWrite(ROW0, displayBuffer[i] & 0b01000000); // displays one column of data on the scan anodes
-    digitalWrite(ROW1, displayBuffer[i] & 0b00100000);
-    digitalWrite(ROW2, displayBuffer[i] & 0b00010000);
-    digitalWrite(ROW3, displayBuffer[i] & 0b00001000);
-    digitalWrite(ROW4, displayBuffer[i] & 0b00000100);
-    digitalWrite(ROW5, displayBuffer[i] & 0b00000010);
-    digitalWrite(ROW6, displayBuffer[i] & 0b00000001);
+    // displays one column of data on the scan anodes
+    if (mirrorVertical)
+    {
+      digitalWrite(ROW6, displayBuffer[i] & 0b01000000);
+      digitalWrite(ROW5, displayBuffer[i] & 0b00100000);
+      digitalWrite(ROW4, displayBuffer[i] & 0b00010000);
+      digitalWrite(ROW3, displayBuffer[i] & 0b00001000);
+      digitalWrite(ROW2, displayBuffer[i] & 0b00000100);
+      digitalWrite(ROW1, displayBuffer[i] & 0b00000010);
+      digitalWrite(ROW0, displayBuffer[i] & 0b00000001);
+    }
+    else
+    {
+      digitalWrite(ROW0, displayBuffer[i] & 0b01000000);
+      digitalWrite(ROW1, displayBuffer[i] & 0b00100000);
+      digitalWrite(ROW2, displayBuffer[i] & 0b00010000);
+      digitalWrite(ROW3, displayBuffer[i] & 0b00001000);
+      digitalWrite(ROW4, displayBuffer[i] & 0b00000100);
+      digitalWrite(ROW5, displayBuffer[i] & 0b00000010);
+      digitalWrite(ROW6, displayBuffer[i] & 0b00000001);
+    }
 
     delayMicroseconds(brightness); // give the plasma time to cook
 
@@ -353,7 +402,6 @@ void setup()
 void loop()
 {
   server.handleClient();
-  receiveInput();
 }
 
 void setup1()
@@ -406,5 +454,8 @@ void loop1()
   }
 
   loadDisplayBuffer();
-  writeDisplay();
+  if (displayEnabled)
+  {
+    writeDisplay();
+  }
 }
