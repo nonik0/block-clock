@@ -48,7 +48,7 @@ Mode mode = SCROLLING_TEXT;
 int displayOffset = 0;                                           // position of whatever is on the display, so this is the compass heading or text scroll
 unsigned char displayBuffer[SCROLLING_TEXT_SIZE * CHAR_SPACING]; // this is where the actual bitmap is loaded to be shown on the display
 // TODO: optimized buf size
-//unsigned char displayBuffer[IVG116_DISPLAY_WIDTH];
+// unsigned char displayBuffer[IVG116_DISPLAY_WIDTH];
 
 // blinkenlights stuff
 bool pixelsActive[IVG116_DISPLAY_WIDTH][IVG116_DISPLAY_HEIGHT];         // this is the bitmap for the blinkenlights
@@ -68,6 +68,8 @@ int scanLocation = -1; // keeps track of where we are in the cathode scanning se
 int brightness = 110;  // number of microseconds to hold on each column of the display (works from like 130 - 270, above that it gets kinda flashy)
 
 WebServer server(80);
+int disconnectCount = 0;
+unsigned long lastStatusCheckMs = 0;
 
 String parseInput()
 {
@@ -107,7 +109,7 @@ String parseInput()
       mode = Mode::BLINKENLIGHTS;
       status += "Mode set to blinkenlights\n";
     }
-    else if (value == "scroll" || value == "scrolling" || value == "scrolling_text")
+    else if (value == "scroll" || value == "scrolling" || value == "scroll_text" || value == "scrolling_text")
     {
       mode = Mode::SCROLLING_TEXT;
       status += "Mode set to scrolling text\n";
@@ -125,8 +127,8 @@ String parseInput()
 
     if (percent >= 0 && percent <= 100)
     {
-      scrollSpeedMs = map(percent, 0, 100, 200, 10);
-      status += "Scroll speed updated to " + String(scrollSpeedMs) + " ms (" + String(percent) + ")\n"; // this maps 0-100% to 200ms (slow) to 10ms (fast)
+      scrollSpeedMs = map(percent, 0, 100, 200, 5);
+      status += "Scroll speed updated to " + String(scrollSpeedMs) + " ms (" + String(percent) + "%)\n"; // this maps 0-100% to 200ms (slow) to 10ms (fast)
     }
     else
     {
@@ -154,6 +156,7 @@ String parseInput()
 
   if (server.hasArg("restart"))
   {
+    Serial.write("Restarting...\n");
     rp2040.restart();
   }
 
@@ -165,16 +168,48 @@ void handleRestRequest()
   String status = parseInput();
 
   if (status.isEmpty())
-  { // if no arguments were passed in, return the current status of the display
-    status = "No parameters received. Current settings:\n";
+  {
+    status = "Settings:\n";
+    status += " - Device Type: " + String(deviceType == IGV1_16 ? "IGV1-16" : "GIPS-16-1") + "\n";
     status += " - Display: " + String(displayEnabled ? "enabled" : "disabled") + "\n";
     status += " - Mode: " + String(mode == Mode::BLINKENLIGHTS ? "blinkenlights" : "scrolling text") + "\n";
     status += " - Scroll Speed: " + String(map(scrollSpeedMs, 10, 200, 0, 100)) + "%\n";
-    status += " - Vertical Mirror: " + String(mirrorVertical ? "enabled" : "disabled") + "\n";
+    status += " - Scroll Text: '" + String(scrollText) + "'\n";
     status += " - Horizontal Mirror: " + String(mirrorHorizontal ? "enabled" : "disabled") + "\n";
+    status += " - Vertical Mirror: " + String(mirrorVertical ? "enabled" : "disabled") + "\n";
+    status += " - Wifi Disconnects: " + String(disconnectCount) + "\n";
+
+    Serial.printf("Handled status request\n");
+  }
+  else
+  {
+    Serial.println("Handled REST request: " + status);
   }
 
-  server.send(200, "text/html", status);
+  server.send(200, "text/plain", status);
+}
+
+void checkWifiStatus()
+{
+  if (millis() - lastStatusCheckMs > 60 * 1000)
+  {
+    lastStatusCheckMs = millis();
+
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      disconnectCount++;
+
+      Serial.println("Wifi disconnecting, attempting to reconnect");
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      while (WiFi.status() != WL_CONNECTED)
+      {
+        delay(500);
+        Serial.print(".");
+      }
+      Serial.println("Reconnected to WiFi");
+    }
+  }
 }
 
 void loadDisplayBuffer()
@@ -272,7 +307,7 @@ void writeDisplay()
   {
     // TODO
   }
-  
+
   scanLocation = -1; // -1 so it doesnt scan on the first time though the loop
   bool scanUp = (deviceType == IGV1_16) ^ mirrorHorizontal;
   int startIndex = scanUp ? displayOffset : displayOffset + IVG116_DISPLAY_WIDTH - 1;
@@ -325,7 +360,6 @@ void writeDisplay()
     digitalWrite(ROW6, HIGH);
   }
 
-
   digitalWrite(ROW0, HIGH);
   digitalWrite(ROW1, HIGH);
   digitalWrite(ROW2, HIGH);
@@ -346,7 +380,7 @@ void writeDisplay()
 void setup()
 {
   Serial.begin(115200);
-  Serial.println("Setting Wifi services");
+  Serial.println("Setting up WiFi services");
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   while (WiFi.status() != WL_CONNECTED)
@@ -363,7 +397,7 @@ void setup()
 
   server.on("/", handleRestRequest);
   server.begin();
-  Serial.println("Rest server started");
+  Serial.println("REST server started");
 
   ArduinoOTA.setHostname(DEVICE_NAME);
   //_ota.setPasswordHash(OTA_PASS_HASH); TODO: add password hash based off IP?
@@ -390,13 +424,15 @@ void setup()
                 } });
   ArduinoOTA.begin();
 
-  Serial.println("Wifi services setup complete");
+  Serial.println("WiFi services setup complete");
 }
 
 void loop()
 {
+  checkWifiStatus();
   ArduinoOTA.handle();
   server.handleClient();
+  yield();
 }
 
 void setup1()
