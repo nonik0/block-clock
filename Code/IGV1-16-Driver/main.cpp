@@ -1,10 +1,11 @@
 // TODO: move display driver code into PIO?
 
+#include <ArduinoOTA.h>
 #include <string.h>
-#include <LEAmDNS.h>
+#include <SimpleMDNS.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
-#include <WebServer.h>
 
 #include "bitmaps.h"
 #include "secrets.h"
@@ -46,6 +47,8 @@ bool mirrorHorizontal = false;
 Mode mode = SCROLLING_TEXT;
 int displayOffset = 0;                                           // position of whatever is on the display, so this is the compass heading or text scroll
 unsigned char displayBuffer[SCROLLING_TEXT_SIZE * CHAR_SPACING]; // this is where the actual bitmap is loaded to be shown on the display
+// TODO: optimized buf size
+//unsigned char displayBuffer[IVG116_DISPLAY_WIDTH];
 
 // blinkenlights stuff
 bool pixelsActive[IVG116_DISPLAY_WIDTH][IVG116_DISPLAY_HEIGHT];         // this is the bitmap for the blinkenlights
@@ -56,9 +59,9 @@ bool scrollingEnabled = true;
 char scrollText[SCROLLING_TEXT_SIZE] = {"Stella and Beau\0 "}; // this is where you put text to display (from wifi or serial or whatever) terminated with \0
 int scrollOffset = IVG116_DISPLAY_WIDTH + 1;                   // used to increment scroll for text scrolling (this value here is the start point)
 int scrollTextSize = sizeof(scrollText) / sizeof(scrollText[0]);
-char receivedChars[SCROLLING_TEXT_SIZE]; // an array to store the received data
-int scrollSpeed = 30;                    // number of millisecods to wait before moving 1 pixel
-unsigned long timeLast = 0;
+char receivedChars[SCROLLING_TEXT_SIZE];
+int scrollSpeedMs = 30;
+unsigned long lastUpdateMillis = 0;
 
 // display driver stuff
 int scanLocation = -1; // keeps track of where we are in the cathode scanning sequence (-1 keeps it from scanning the first cycle)
@@ -66,31 +69,15 @@ int brightness = 110;  // number of microseconds to hold on each column of the d
 
 WebServer server(80);
 
-const String postForms = "<html>\
-  <head>\
-<title>Pico-W Web Server POST handling</title>\
-   <style>\
-    body { background-color: #795973; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; font-size: 15}\
-    </style>\
-  </head>\
-  <body>\
-    <h1>pIGV1-16 web entry! Type some stuff below to have it show up on the display.</h1><br>\
-    <form method=\"post\" enctype=\"application/x-www-form-urlencoded\" action=\"/postform/\">\
-      <textarea name=\"message\" style=\"width:1000px;height:150px;background-color:#CB1334;color:##FFBC46;font-size:150%;\"></textarea><br>\
-      <input type=\"submit\" value=\"Submit\">\
-    </form>\
-  </body>\
-</html>";
-
-void receiveInput()
+String parseInput()
 {
-  if (server.hasArg("message") > 0)
+  String status = "";
+
+  if (server.hasArg("message"))
   {
     String inputText = server.arg("message");
     strncpy(scrollText, inputText.c_str(), SCROLLING_TEXT_SIZE);
-
-    Serial.print("Received text: ");
-    Serial.println(scrollText);
+    status += "Message updated: '" + inputText + "'\n"; // update the scroll text with the new message
   }
 
   if (server.hasArg("display"))
@@ -101,12 +88,49 @@ void receiveInput()
     if (value == "off" || value == "false")
     {
       displayEnabled = false;
-      Serial.println("Display disabled");
+      status += "Display disabled\n";
     }
     else if (value == "on" || value == "true")
     {
       displayEnabled = true;
-      Serial.println("Display enabled");
+      status += "Display enabled\n";
+    }
+  }
+
+  if (server.hasArg("mode"))
+  {
+    String value = server.arg("mode");
+    value.toLowerCase();
+
+    if (value == "blinkenlights")
+    {
+      mode = Mode::BLINKENLIGHTS;
+      status += "Mode set to blinkenlights\n";
+    }
+    else if (value == "scroll" || value == "scrolling" || value == "scrolling_text")
+    {
+      mode = Mode::SCROLLING_TEXT;
+      status += "Mode set to scrolling text\n";
+    }
+    else
+    {
+      status += "Mode value '" + value + "' is invalid\n";
+    }
+  }
+
+  if (server.hasArg("scrollSpeed"))
+  {
+    String value = server.arg("scrollSpeed");
+    int percent = value.toInt();
+
+    if (percent >= 0 && percent <= 100)
+    {
+      scrollSpeedMs = map(percent, 0, 100, 200, 10);
+      status += "Scroll speed updated to " + String(scrollSpeedMs) + " ms (" + String(percent) + ")\n"; // this maps 0-100% to 200ms (slow) to 10ms (fast)
+    }
+    else
+    {
+      status += "Invalid scroll speed percent: " + String(percent) + "\n";
     }
   }
 
@@ -115,9 +139,8 @@ void receiveInput()
     String value = server.arg("vmirror");
     value.toLowerCase();
 
-    mirrorVertical = value == "true" ? true : false;
-    Serial.print("Vertical mirror: ");
-    Serial.println(mirrorVertical);
+    mirrorVertical = value == "true" || value == "yes" || value == "on";
+    status += "Vertical mirror " + String(mirrorVertical ? "enabled" : "disabled") + "\n";
   }
 
   if (server.hasArg("hmirror"))
@@ -125,71 +148,37 @@ void receiveInput()
     String value = server.arg("hmirror");
     value.toLowerCase();
 
-    mirrorHorizontal = value == "true" ? true : false;
-    Serial.print("Horizontal mirror: ");
-    Serial.println(mirrorHorizontal);
+    mirrorHorizontal = value == "true" || value == "yes" || value == "on";
+    status += "Horizontal mirror " + String(mirrorHorizontal ? "enabled" : "disabled") + "\n";
   }
+
+  if (server.hasArg("restart"))
+  {
+    rp2040.restart();
+  }
+
+  return status;
 }
 
-void handleRoot()
+void handleRestRequest()
 {
-  server.send(200, "text/html", postForms);
+  String status = parseInput();
 
-  receiveInput();
-}
-
-void handlePlain()
-{
-  if (server.method() != HTTP_POST)
-  {
-    server.send(405, "text/plain", "Method Not Allowed");
-  }
-  else
-  {
-    server.send(200, "text/plain", "POST body was:\n" + server.arg("plain"));
+  if (status.isEmpty())
+  { // if no arguments were passed in, return the current status of the display
+    status = "No parameters received. Current settings:\n";
+    status += " - Display: " + String(displayEnabled ? "enabled" : "disabled") + "\n";
+    status += " - Mode: " + String(mode == Mode::BLINKENLIGHTS ? "blinkenlights" : "scrolling text") + "\n";
+    status += " - Scroll Speed: " + String(map(scrollSpeedMs, 10, 200, 0, 100)) + "%\n";
+    status += " - Vertical Mirror: " + String(mirrorVertical ? "enabled" : "disabled") + "\n";
+    status += " - Horizontal Mirror: " + String(mirrorHorizontal ? "enabled" : "disabled") + "\n";
   }
 
-  receiveInput();
-}
-
-void handleForm()
-{
-  if (server.method() != HTTP_POST)
-  {
-    server.send(405, "text/plain", "Method Not Allowed");
-  }
-  else
-  {
-    String message = "POST form was:\n";
-    for (uint8_t i = 0; i < server.args(); i++)
-    {
-      message += " " + server.argName(1) + ": " + server.arg(i) + "\n";
-    }
-    server.send(200, "text/plain", message);
-  }
-
-  receiveInput();
-}
-
-void handleNotFound()
-{
-  String message = "File Not Found\n\n";
-  message += "URI: ";
-  message += server.uri();
-  message += "\nMethod: ";
-  message += (server.method() == HTTP_GET) ? "GET" : "POST";
-  message += "\nArguments: ";
-  message += server.args();
-  message += "\n";
-  for (uint8_t i = 0; i < server.args(); i++)
-  {
-    message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
-  }
-  server.send(404, "text/plain", message);
+  server.send(200, "text/html", status);
 }
 
 void loadDisplayBuffer()
-{ // this fills displayBuffer[] with data depending on the menu
+{
   switch (mode)
   {
   case Mode::BLINKENLIGHTS:
@@ -209,57 +198,58 @@ void loadDisplayBuffer()
 
       displayBuffer[col] = ~colBits;
     }
-
-    // TODO: better way to limit refresh rate
-    delay(10);
     break;
 
   case Mode::SCROLLING_TEXT:
-    int bufIdx = 0;
-    int textIdx = 0;
+    int bufIndex = 0;
+    int textIndex = 0;
     bool endFlag = false;
     bool foundEndingFlag = false;
 
-    while (bufIdx < sizeof(displayBuffer))
+    // fills buffer with repeat copies of message, TODO: optimize
+    while (bufIndex < sizeof(displayBuffer))
     {
-      if (scrollText[bufIdx / CHAR_SPACING] == '\0' && !foundEndingFlag)
+      if (!foundEndingFlag && scrollText[bufIndex / CHAR_SPACING] == '\0')
       {
         foundEndingFlag = true;
-        scrollTextSize = bufIdx / CHAR_SPACING + 1;
+        scrollTextSize = bufIndex / CHAR_SPACING + 1;
       }
 
-      if (textIdx > scrollTextSize)
-      {                 // this makes it fill the entire buffer with repeated copies of displayText[]
-        endFlag = true; // if speed is an issue you can change this loop to not waste so many cycles
-        textIdx = -1;
+      if (textIndex > scrollTextSize)
+      {
+        endFlag = true;
+        textIndex = -1;
       }
       else
       {
         endFlag = false;
       }
 
-      for (int charIdx = 0; charIdx < CHAR_WIDTH; charIdx++)
+      // write char bits
+      int charBitmapIndex = scrollText[textIndex] - 32; //' ';
+      if (charBitmapIndex > 92 || charBitmapIndex < 0)
+      {
+        charBitmapIndex = 0;
+      }
+      for (int charOffset = 0; charOffset < CHAR_WIDTH; charOffset++)
       {
         if (endFlag)
         {
-          displayBuffer[bufIdx + charIdx] = BLANK_COL;
+          displayBuffer[bufIndex + charOffset] = BLANK_COL;
           continue;
         }
 
-        int letterIndex = scrollText[textIdx] - 32; //' ';
-        if (letterIndex > 92 || letterIndex < 0)
-          letterIndex = 0;
-
-        displayBuffer[bufIdx + charIdx] = ~CHAR_BITMAPS[letterIndex][charIdx];
+        displayBuffer[bufIndex + charOffset] = ~CHAR_BITMAPS[charBitmapIndex][charOffset];
       }
 
-      for (int gapIdx = 0; gapIdx < CHAR_SPACING - CHAR_WIDTH; gapIdx++)
+      // write space between characters
+      for (int gapIndex = 0; gapIndex < CHAR_SPACING - CHAR_WIDTH; gapIndex++)
       {
-        displayBuffer[bufIdx + CHAR_WIDTH + gapIdx] = BLANK_COL;
+        displayBuffer[bufIndex + CHAR_WIDTH + gapIndex] = BLANK_COL;
       }
 
-      bufIdx += CHAR_SPACING;
-      textIdx += 1;
+      bufIndex += CHAR_SPACING;
+      textIndex += 1;
     }
     break;
   }
@@ -282,7 +272,8 @@ void writeDisplay()
   {
     // TODO
   }
-
+  
+  scanLocation = -1; // -1 so it doesnt scan on the first time though the loop
   bool scanUp = (deviceType == IGV1_16) ^ mirrorHorizontal;
   int startIndex = scanUp ? displayOffset : displayOffset + IVG116_DISPLAY_WIDTH - 1;
   int endIndex = scanUp ? displayOffset + IVG116_DISPLAY_WIDTH + 1 : displayOffset - 1;
@@ -297,25 +288,9 @@ void writeDisplay()
     digitalWrite(ROW6, HIGH);
 
     scanLocation = (scanLocation + 1) % 3;
-
-    if (scanLocation == 0)
-    {
-      digitalWrite(SCAN1, HIGH);
-      digitalWrite(SCAN2, LOW);
-      digitalWrite(SCAN3, LOW);
-    }
-    else if (scanLocation == 1)
-    {
-      digitalWrite(SCAN2, HIGH); // pull the scan high first to give an infinitesimally small overlap
-      digitalWrite(SCAN1, LOW);
-      digitalWrite(SCAN3, LOW);
-    }
-    else if (scanLocation == 2)
-    {
-      digitalWrite(SCAN3, HIGH);
-      digitalWrite(SCAN1, LOW);
-      digitalWrite(SCAN2, LOW);
-    }
+    digitalWrite(SCAN1, scanLocation == 0);
+    digitalWrite(SCAN2, scanLocation == 1);
+    digitalWrite(SCAN3, scanLocation == 2);
 
     // displays one column of data on the scan anodes
     if (mirrorVertical)
@@ -350,7 +325,6 @@ void writeDisplay()
     digitalWrite(ROW6, HIGH);
   }
 
-  scanLocation = -1; // -1 so it doesnt scan on the first time though the loop
 
   digitalWrite(ROW0, HIGH);
   digitalWrite(ROW1, HIGH);
@@ -372,7 +346,7 @@ void writeDisplay()
 void setup()
 {
   Serial.begin(115200);
-  Serial.println("ready");
+  Serial.println("Setting Wifi services");
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   while (WiFi.status() != WL_CONNECTED)
@@ -380,32 +354,55 @@ void setup()
     delay(500);
     Serial.print(".");
   }
-  Serial.println("");
-  Serial.print("Connected to ");
-  Serial.println(WIFI_SSID);
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+  Serial.printf("\nConnected to %s\nIP address: %s\n", WIFI_SSID, WiFi.localIP().toString().c_str());
 
   if (MDNS.begin(DEVICE_NAME))
   {
     Serial.println("MDNS responder started");
   }
 
-  server.on("/", handleRoot);
-  server.on("/postplain/", handlePlain);
-  server.on("/postform/", handleForm);
-  server.onNotFound(handleNotFound);
+  server.on("/", handleRestRequest);
   server.begin();
-  Serial.println("HTTP server started");
+  Serial.println("Rest server started");
+
+  ArduinoOTA.setHostname(DEVICE_NAME);
+  //_ota.setPasswordHash(OTA_PASS_HASH); TODO: add password hash based off IP?
+
+  ArduinoOTA.onStart([]()
+                     { Serial.printf("Start updating %s", ArduinoOTA.getCommand() == U_FLASH ? "sketch" : "filesystem"); });
+  ArduinoOTA.onEnd([]()
+                   { Serial.printf("\nEnd"); });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
+                        { Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
+  ArduinoOTA.onError([](ota_error_t error)
+                     {
+                Serial.printf("Error[%u]: ", error);
+                if (error == OTA_AUTH_ERROR) {
+                  Serial.println("Auth Failed");
+                } else if (error == OTA_BEGIN_ERROR) {
+                  Serial.println("Begin Failed");
+                } else if (error == OTA_CONNECT_ERROR) {
+                  Serial.println("Connect Failed");
+                } else if (error == OTA_RECEIVE_ERROR) {
+                  Serial.println("Receive Failed");
+                } else if (error == OTA_END_ERROR) {
+                  Serial.println("End Failed");
+                } });
+  ArduinoOTA.begin();
+
+  Serial.println("Wifi services setup complete");
 }
 
 void loop()
 {
+  ArduinoOTA.handle();
   server.handleClient();
 }
 
 void setup1()
 {
+  Serial.println("Setting up IVG1-16 display");
+
   pinMode(SCAN1, OUTPUT_8MA);
   pinMode(SCAN2, OUTPUT_8MA);
   pinMode(SCAN3, OUTPUT_8MA);
@@ -429,23 +426,24 @@ void setup1()
       pixelsDelay[col][row] = random(BLINKENLIGHTS_BASE_DELAY * 4, BLINKENLIGHTS_BASE_DELAY * 8);
     }
   }
+
+  Serial.println("IVG1-16 display setup complete");
 }
 
 void loop1()
 {
-  unsigned long timeNow = millis();
-
   if (scrollingEnabled)
   {
-    if (timeNow - timeLast > scrollSpeed)
+    if (millis() - lastUpdateMillis > scrollSpeedMs)
     {
       scrollOffset++;
 
-      if (scrollOffset >= (scrollTextSize * CHAR_SPACING) + (3 * CHAR_SPACING))
-      { // move back scroll position after writing out full display and the 3 char gap
+      // move back scroll position after writing out full display and the 3 char gap
+      if (scrollOffset >= scrollTextSize * CHAR_SPACING + 3 * CHAR_SPACING)
+      {
         scrollOffset = CHAR_SPACING;
       }
-      timeLast = timeNow;
+      lastUpdateMillis = millis();
     }
   }
   else
