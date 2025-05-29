@@ -40,10 +40,16 @@ enum Mode
   SCROLLING_TEXT
 };
 
+#ifdef IVG1_16_DEVICE
 DeviceType deviceType = IGV1_16;
-bool displayEnabled = true;
-bool mirrorVertical = false;
+bool mirrorHorizontal = true;
+bool mirrorVertical = true;
+#else // default, also #ifdef GIPS_16_1
+DeviceType deviceType = GIPS_16_1;
 bool mirrorHorizontal = false;
+bool mirrorVertical = false;
+#endif
+bool displayEnabled = true;
 Mode mode = SCROLLING_TEXT;
 int displayOffset = 0;                                           // position of whatever is on the display, so this is the compass heading or text scroll
 unsigned char displayBuffer[SCROLLING_TEXT_SIZE * CHAR_SPACING]; // this is where the actual bitmap is loaded to be shown on the display
@@ -56,11 +62,12 @@ unsigned long pixelsDelay[IVG116_DISPLAY_WIDTH][IVG116_DISPLAY_HEIGHT]; // this 
 
 // scrolling text stuff
 bool scrollingEnabled = true;
-char scrollText[SCROLLING_TEXT_SIZE] = {"Stella and Beau\0 "}; // this is where you put text to display (from wifi or serial or whatever) terminated with \0
+char scrollText[SCROLLING_TEXT_SIZE] = {"This is block clock, or not?\0 "}; // this is where you put text to display (from wifi or serial or whatever) terminated with \0
 int scrollOffset = IVG116_DISPLAY_WIDTH + 1;                   // used to increment scroll for text scrolling (this value here is the start point)
 int scrollTextSize = sizeof(scrollText) / sizeof(scrollText[0]);
 char receivedChars[SCROLLING_TEXT_SIZE];
-int scrollSpeedMs = 30;
+int scrollSpeedPercent = 52;
+int scrollSpeedMs = 15;
 unsigned long lastUpdateMillis = 0;
 
 // display driver stuff
@@ -127,7 +134,12 @@ String parseInput()
 
     if (percent >= 0 && percent <= 100)
     {
-      scrollSpeedMs = map(percent, 0, 100, 200, 5);
+      scrollSpeedPercent = percent;
+
+      const float SlowestScrollMs = 150.0f;
+      const float FastestScrollMs = 2.0f;
+      float expBase = pow(FastestScrollMs / SlowestScrollMs, 1.0f / 100.0f);
+      scrollSpeedMs = constrain((int)SlowestScrollMs * pow(expBase, percent), (int)FastestScrollMs, (int)SlowestScrollMs);
       status += "Scroll speed updated to " + String(scrollSpeedMs) + " ms (" + String(percent) + "%)\n"; // this maps 0-100% to 200ms (slow) to 10ms (fast)
     }
     else
@@ -173,7 +185,7 @@ void handleRestRequest()
     status += " - Device Type: " + String(deviceType == IGV1_16 ? "IGV1-16" : "GIPS-16-1") + "\n";
     status += " - Display: " + String(displayEnabled ? "enabled" : "disabled") + "\n";
     status += " - Mode: " + String(mode == Mode::BLINKENLIGHTS ? "blinkenlights" : "scrolling text") + "\n";
-    status += " - Scroll Speed: " + String(map(scrollSpeedMs, 10, 200, 0, 100)) + "%\n";
+    status += " - Scroll Speed: " + String(scrollSpeedPercent) + "% (" + String(scrollSpeedMs) + "ms)\n";
     status += " - Scroll Text: '" + String(scrollText) + "'\n";
     status += " - Horizontal Mirror: " + String(mirrorHorizontal ? "enabled" : "disabled") + "\n";
     status += " - Vertical Mirror: " + String(mirrorVertical ? "enabled" : "disabled") + "\n";
@@ -242,6 +254,7 @@ void loadDisplayBuffer()
     bool foundEndingFlag = false;
 
     // fills buffer with repeat copies of message, TODO: optimize
+    // TODO: figure out how current impl avoids buffer skipping to avoid UTF-8 issues by skipping them
     while (bufIndex < sizeof(displayBuffer))
     {
       if (!foundEndingFlag && scrollText[bufIndex / CHAR_SPACING] == '\0')
@@ -402,10 +415,16 @@ void setup()
   ArduinoOTA.setHostname(DEVICE_NAME);
   //_ota.setPasswordHash(OTA_PASS_HASH); TODO: add password hash based off IP?
 
+  static bool displayStateOta = false;
   ArduinoOTA.onStart([]()
-                     { Serial.printf("Start updating %s", ArduinoOTA.getCommand() == U_FLASH ? "sketch" : "filesystem"); });
+                     {
+                      displayStateOta = displayEnabled; 
+                      displayEnabled = false;
+                      Serial.printf("Start updating %s", ArduinoOTA.getCommand() == U_FLASH ? "sketch" : "filesystem"); });
   ArduinoOTA.onEnd([]()
-                   { Serial.printf("\nEnd"); });
+                   {
+                    Serial.printf("\nEnd");
+                    displayEnabled = displayStateOta; });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
                         { Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
   ArduinoOTA.onError([](ota_error_t error)
