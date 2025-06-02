@@ -20,7 +20,6 @@ All components are stacked together: the PCB is mounted to the back of the GIPS-
 Based off of the firmware of the forked driver backpack project with some refactoring, code cleanup, and additions. One core handles updating the display buffer and handling REST API calls and the other core is dedicated to the display driver--i.e. controlling the scanning output to the matrix. Added support for OTA updates and a few other control settings.
 
 ## Future Improvements
-- decent final pictures
 - optimize firmware display buffer code - quick fixes seem to break smooth scrolling, so needs more investigation
 - improve rigidity of PCB support panel - limited with case tightening since the PCB/support can flex too much
 - smaller HV boost circuit - current one is too large for what's needed
@@ -50,6 +49,9 @@ Based off of the firmware of the forked driver backpack project with some refact
 
 #### Finished
 
+<p align="center" width="100%">
+  <img src="images/final_front_2.jpg" width="40%" />
+</p>
 <p align="center" width="100%">
   <img src="images/final_front.jpg" width="40%" />
   <img src="images/final_back.jpg" width="40%" />
