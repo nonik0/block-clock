@@ -63,7 +63,7 @@ unsigned long pixelsDelay[IVG116_DISPLAY_WIDTH][IVG116_DISPLAY_HEIGHT]; // this 
 // scrolling text stuff
 bool scrollingEnabled = true;
 char scrollText[SCROLLING_TEXT_SIZE] = {"This is block clock, or not?\0 "}; // this is where you put text to display (from wifi or serial or whatever) terminated with \0
-int scrollOffset = IVG116_DISPLAY_WIDTH + 1;                   // used to increment scroll for text scrolling (this value here is the start point)
+int scrollOffset = IVG116_DISPLAY_WIDTH + 1;                                // used to increment scroll for text scrolling (this value here is the start point)
 int scrollTextSize = sizeof(scrollText) / sizeof(scrollText[0]);
 char receivedChars[SCROLLING_TEXT_SIZE];
 int scrollSpeedPercent = 52;
@@ -76,6 +76,7 @@ int brightness = 110;  // number of microseconds to hold on each column of the d
 
 WebServer server(80);
 int disconnectCount = 0;
+bool watchdogReboot = false;
 unsigned long lastStatusCheckMs = 0;
 
 String parseInput()
@@ -189,6 +190,7 @@ void handleRestRequest()
     status += " - Scroll Text: '" + String(scrollText) + "'\n";
     status += " - Horizontal Mirror: " + String(mirrorHorizontal ? "enabled" : "disabled") + "\n";
     status += " - Vertical Mirror: " + String(mirrorVertical ? "enabled" : "disabled") + "\n";
+    status += " - Watchdog Reboot: " + String(watchdogReboot ? "yes" : "no") + "\n";
     status += " - Wifi Disconnects: " + String(disconnectCount) + "\n";
 
     Serial.printf("Handled status request\n");
@@ -393,6 +395,9 @@ void writeDisplay()
 void setup()
 {
   Serial.begin(115200);
+
+  watchdogReboot = watchdog_caused_reboot();
+
   Serial.println("Setting up WiFi services");
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -443,6 +448,7 @@ void setup()
                 } });
   ArduinoOTA.begin();
 
+  watchdog_enable(30000, true);
   Serial.println("WiFi services setup complete");
 }
 
@@ -451,6 +457,7 @@ void loop()
   checkWifiStatus();
   ArduinoOTA.handle();
   server.handleClient();
+  watchdog_update();
   yield();
 }
 
