@@ -76,7 +76,7 @@ int brightness = 110;  // number of microseconds to hold on each column of the d
 
 WebServer server(80);
 int disconnectCount = 0;
-bool watchdogReboot = false;
+bool watchdogRebooted = false;
 unsigned long lastStatusCheckMs = 0;
 
 String parseInput()
@@ -190,7 +190,7 @@ void handleRestRequest()
     status += " - Scroll Text: '" + String(scrollText) + "'\n";
     status += " - Horizontal Mirror: " + String(mirrorHorizontal ? "enabled" : "disabled") + "\n";
     status += " - Vertical Mirror: " + String(mirrorVertical ? "enabled" : "disabled") + "\n";
-    status += " - Watchdog Reboot: " + String(watchdogReboot ? "yes" : "no") + "\n";
+    status += " - Watchdog Caused Reboot: " + String(watchdog_caused_reboot() ? "yes" : "no") + ", Enable: " + String(watchdog_enable_caused_reboot() ? "yes" : "no") + "\n";
     status += " - Wifi Disconnects: " + String(disconnectCount) + "\n";
 
     Serial.printf("Handled status request\n");
@@ -395,9 +395,6 @@ void writeDisplay()
 void setup()
 {
   Serial.begin(115200);
-
-  watchdogReboot = watchdog_caused_reboot();
-
   Serial.println("Setting up WiFi services");
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -431,8 +428,7 @@ void setup()
                     Serial.printf("\nEnd");
                     displayEnabled = displayStateOta; });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
-                        { watchdog_update(); // kick the dog
-                          Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
+                        { Serial.printf("Progress: %u%%\r", (progress / (total / 100))); });
   ArduinoOTA.onError([](ota_error_t error)
                      {
                 Serial.printf("Error[%u]: ", error);
@@ -449,7 +445,6 @@ void setup()
                 } });
   ArduinoOTA.begin();
 
-  watchdog_enable(30000, true);
   Serial.println("WiFi services setup complete");
 }
 
@@ -480,6 +475,10 @@ void setup1()
 
   pinMode(BLANK, OUTPUT_8MA);
 
+  // initialize watchdog -- we really want to reboot if the display stops updating
+  watchdog_enable(8000, true); // max is 8333
+  watchdog_update();
+
   // initialize blinkenlights
   for (int col = 0; col < IVG116_DISPLAY_WIDTH; col++)
   {
@@ -495,6 +494,9 @@ void setup1()
 
 void loop1()
 {
+  // feed the dog -- will reboot if scan loop is not running
+  watchdog_update();
+
   if (scrollingEnabled)
   {
     if (millis() - lastUpdateMillis > scrollSpeedMs)
