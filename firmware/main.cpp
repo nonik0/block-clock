@@ -1,6 +1,7 @@
 // TODO: move display driver code into PIO?
 
 #include <ArduinoOTA.h>
+#include <EEPROM.h>
 #include <string.h>
 #include <SimpleMDNS.h>
 #include <WebServer.h>
@@ -27,6 +28,12 @@
 
 #define SCROLLING_TEXT_SIZE 500
 #define BLINKENLIGHTS_BASE_DELAY 100
+
+#define EEPROM_WIFI_REBOOT_ADDR 0
+#define MAX_WIFI_RETRY_ATTEMPTS 3
+#define WIFI_CONNECT_TIMEOUT_MS 30 * 1000
+#define WIFI_STATUS_PERIOD_MS 60 * 1000
+#define WIFI_REBOOT_FLAG 0xAA
 
 enum DeviceType
 {
@@ -74,10 +81,12 @@ unsigned long lastUpdateMillis = 0;
 int scanLocation = -1; // keeps track of where we are in the cathode scanning sequence (-1 keeps it from scanning the first cycle)
 int brightness = 110;  // number of microseconds to hold on each column of the display (works from like 130 - 270, above that it gets kinda flashy)
 
+// wifi stuff
 WebServer server(80);
-int disconnectCount = 0;
-bool watchdogRebooted = false;
-unsigned long lastStatusCheckMs = 0;
+int wifiReconnectCount = 0;
+int wifiRetryCount = 0;
+bool wifiCausedReboot = false;
+unsigned long wifiLastStatusCheckMs = 0;
 
 String parseInput()
 {
@@ -191,7 +200,12 @@ void handleRestRequest()
     status += " - Horizontal Mirror: " + String(mirrorHorizontal ? "enabled" : "disabled") + "\n";
     status += " - Vertical Mirror: " + String(mirrorVertical ? "enabled" : "disabled") + "\n";
     status += " - Watchdog Caused Reboot: " + String(watchdog_caused_reboot() ? "yes" : "no") + ", Enable: " + String(watchdog_enable_caused_reboot() ? "yes" : "no") + "\n";
-    status += " - Wifi Disconnects: " + String(disconnectCount) + "\n";
+    status += " - WiFi Caused Reboot: " + String(wifiCausedReboot ? "yes" : "no") + "\n";
+    status += " - Wifi Reconnects: " + String(wifiReconnectCount) + "\n";
+    if (wifiRetryCount > 0)
+    {
+      status += " - Wifi Retries: " + String(wifiRetryCount) + "\n";
+    }
 
     Serial.printf("Handled status request\n");
   }
@@ -205,24 +219,50 @@ void handleRestRequest()
 
 void checkWifiStatus()
 {
-  if (millis() - lastStatusCheckMs > 60 * 1000)
+  if (millis() - wifiLastStatusCheckMs > WIFI_STATUS_PERIOD_MS)
   {
-    lastStatusCheckMs = millis();
+    wifiLastStatusCheckMs = millis();
 
     if (WiFi.status() != WL_CONNECTED)
     {
-      disconnectCount++;
+      wifiRetryCount++;
 
-      Serial.println("Wifi disconnecting, attempting to reconnect");
+      Serial.printf("WiFi disconnected, attempting to reconnect (attempt %d/%d)\n", wifiRetryCount, MAX_WIFI_RETRY_ATTEMPTS);
+
       WiFi.disconnect();
       WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+      unsigned long reconnectStartMs = millis();
       while (WiFi.status() != WL_CONNECTED)
       {
         delay(500);
         Serial.print(".");
+
+        if (millis() - reconnectStartMs > WIFI_CONNECT_TIMEOUT_MS)
+        {
+          WiFi.disconnect();
+          Serial.printf("\nWiFi reconnection attempt %d failed after 30 seconds\n", wifiRetryCount);
+          
+          if (wifiRetryCount >= MAX_WIFI_RETRY_ATTEMPTS)
+          {
+            Serial.println("Maximum WiFi retry attempts exceeded, rebooting...");
+            
+            EEPROM.write(EEPROM_WIFI_REBOOT_ADDR, WIFI_REBOOT_FLAG);
+            EEPROM.commit();
+            rp2040.restart();
+          }
+          
+          strncpy(scrollText, "WiFi failing to reconnect", SCROLLING_TEXT_SIZE);
+          return;
+        }
       }
-      Serial.println("Reconnected to WiFi");
+
+      Serial.println("\nReconnected to WiFi");
+      strncpy(scrollText, "WiFi reconnected", SCROLLING_TEXT_SIZE);
+      wifiReconnectCount++;
     }
+
+    wifiRetryCount = 0;
   }
 }
 
@@ -395,15 +435,36 @@ void writeDisplay()
 void setup()
 {
   Serial.begin(115200);
+
+  EEPROM.begin(512);
+  if (EEPROM.read(EEPROM_WIFI_REBOOT_ADDR) == WIFI_REBOOT_FLAG)
+  {
+    wifiCausedReboot = true;
+    EEPROM.write(EEPROM_WIFI_REBOOT_ADDR, 0x00);
+    EEPROM.commit();
+    Serial.println("Detected WiFi-caused reboot");
+  }
+
   Serial.println("Setting up WiFi services");
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED)
+
+  unsigned long wifiConnectStartMs = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiConnectStartMs < WIFI_CONNECT_TIMEOUT_MS)
   {
     delay(500);
     Serial.print(".");
   }
-  Serial.printf("\nConnected to %s\nIP address: %s\n", WIFI_SSID, WiFi.localIP().toString().c_str());
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.printf("\nConnected to %s\nIP address: %s\n", WIFI_SSID, WiFi.localIP().toString().c_str());
+  }
+  else
+  {
+    Serial.println("\nWiFi failed to connect at boot");
+    strncpy(scrollText, "WiFi not connected", SCROLLING_TEXT_SIZE);
+  }
 
   if (MDNS.begin(DEVICE_NAME))
   {
