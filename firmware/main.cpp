@@ -35,6 +35,26 @@
 #define WIFI_STATUS_PERIOD_MS 60 * 1000
 #define WIFI_REBOOT_FLAG 0xAA
 
+// ASCII character mapping constants
+#define ASCII_SPACE_OFFSET 32    // ASCII space character
+#define MAX_CHAR_INDEX 92        // Maximum character index in bitmap array
+#define MIN_CHAR_INDEX 0         // Minimum valid character index
+#define ASCII_PRINTABLE_MIN 32   // First printable ASCII character (space)
+#define ASCII_PRINTABLE_MAX 126  // Last printable ASCII character (~)
+
+// Display timing constants
+#define DEFAULT_BRIGHTNESS 110   // Default microseconds per column
+#define MIN_BRIGHTNESS 130       // Minimum stable brightness value
+#define MAX_BRIGHTNESS 270       // Maximum brightness before flashy
+#define WATCHDOG_TIMEOUT_MS 8000 // Watchdog timeout in milliseconds
+#define WATCHDOG_MAX_MS 8333     // Maximum possible watchdog timeout
+#define DISPLAY_BLANK_DELAY_US 25 // Microseconds for blanking pulse
+
+// String buffer sizes
+#define STATUS_STRING_RESERVE 200 // Pre-allocation size for status messages
+#define SPEED_MSG_BUFFER_SIZE 100 // Buffer size for speed message formatting
+#define ERROR_MSG_BUFFER_SIZE 50  // Buffer size for error message formatting
+
 enum DeviceType
 {
   IGV1_16,
@@ -56,15 +76,13 @@ DeviceType deviceType = GIPS_16_1;
 bool mirrorHorizontal = false;
 bool mirrorVertical = false;
 #endif
-bool displayEnabled = true;
+bool displayEnabled = false;
 Mode mode = SCROLLING_TEXT;
 int displayOffset = 0;                                           // position of whatever is on the display, so this is the compass heading or text scroll
 unsigned char displayBuffer[SCROLLING_TEXT_SIZE * CHAR_SPACING]; // this is where the actual bitmap is loaded to be shown on the display
-// TODO: optimized buf size
-// unsigned char displayBuffer[IVG116_DISPLAY_WIDTH];
 
 // blinkenlights stuff
-bool pixelsActive[IVG116_DISPLAY_WIDTH][IVG116_DISPLAY_HEIGHT];         // this is the bitmap for the blinkenlights
+uint8_t pixelsActive[IVG116_DISPLAY_WIDTH];         // bit-packed bitmap for blinkenlights (1 bit per pixel)
 unsigned long pixelsDelay[IVG116_DISPLAY_WIDTH][IVG116_DISPLAY_HEIGHT]; // this is the delay for the blinkenlights
 
 // scrolling text stuff
@@ -72,14 +90,17 @@ bool scrollingEnabled = true;
 char scrollText[SCROLLING_TEXT_SIZE] = {"This is block clock, or not?\0 "}; // this is where you put text to display (from wifi or serial or whatever) terminated with \0
 int scrollOffset = IVG116_DISPLAY_WIDTH + 1;                                // used to increment scroll for text scrolling (this value here is the start point)
 int scrollTextSize = sizeof(scrollText) / sizeof(scrollText[0]);
-char receivedChars[SCROLLING_TEXT_SIZE];
 int scrollSpeedPercent = 52;
 int scrollSpeedMs = 15;
 unsigned long lastUpdateMillis = 0;
 
+// Performance optimization: cache text buffer and length
+bool textBufferDirty = true;  // Flag to rebuild buffer only when text changes
+int cachedTextLength = 0;     // Cached length calculation
+
 // display driver stuff
 int scanLocation = -1; // keeps track of where we are in the cathode scanning sequence (-1 keeps it from scanning the first cycle)
-int brightness = 110;  // number of microseconds to hold on each column of the display (works from like 130 - 270, above that it gets kinda flashy)
+int brightness = DEFAULT_BRIGHTNESS;  // microseconds per column (range: MIN_BRIGHTNESS - MAX_BRIGHTNESS)
 
 // wifi stuff
 WebServer server(80);
@@ -88,15 +109,77 @@ int wifiRetryCount = 0;
 bool wifiCausedReboot = false;
 unsigned long wifiLastStatusCheckMs = 0;
 
+// Connection display timing
+enum ConnectionDisplayState { SHOW_MDNS, SHOW_IP, SHOW_ERROR, NORMAL_MODE };
+ConnectionDisplayState connectionDisplayState = NORMAL_MODE;
+unsigned long connectionDisplayStartMs = 0;
+const unsigned long CONNECTION_DISPLAY_DURATION_MS = 3000;
+const unsigned long ERROR_DISPLAY_DURATION_MS = 5000;
+
+// Display mode function pointers
+typedef void (*DisplayModeFunction)();
+DisplayModeFunction currentDisplayMode = NULL;
+
+// Forward declarations
+void loadBlinkenLights();
+void loadScrollingText();
+void updateDisplayMode();
+void filterASCIIText(const char* input, char* output, int maxLength);
+
+// Bit manipulation helpers for pixelsActive
+inline bool getPixel(int col, int row) {
+  return (pixelsActive[col] >> row) & 1;
+}
+
+inline void setPixel(int col, int row, bool value) {
+  if (value) {
+    pixelsActive[col] |= (1 << row);
+  } else {
+    pixelsActive[col] &= ~(1 << row);
+  }
+}
+
+// Helper to filter out non-ASCII characters from text
+void filterASCIIText(const char* input, char* output, int maxLength) {
+  int inputPos = 0;
+  int outputPos = 0;
+  
+  while (input[inputPos] != '\0' && outputPos < maxLength - 1) {
+    unsigned char c = (unsigned char)input[inputPos];
+    
+    // Only keep printable ASCII characters
+    if (c >= ASCII_PRINTABLE_MIN && c <= ASCII_PRINTABLE_MAX) {
+      output[outputPos] = input[inputPos];
+      outputPos++;
+    }
+    // Skip non-ASCII and non-printable characters
+    
+    inputPos++;
+  }
+  
+  output[outputPos] = '\0'; // Null terminate
+}
+
+// Helper to update scroll text and invalidate caches
+void updateScrollText(const char* newText) {
+  filterASCIIText(newText, scrollText, SCROLLING_TEXT_SIZE);
+  textBufferDirty = true;  // Mark buffer for rebuild
+  cachedTextLength = 0;    // Invalidate cached length
+}
+
+
 String parseInput()
 {
-  String status = "";
+  String status;
+  status.reserve(STATUS_STRING_RESERVE); // Pre-allocate to reduce heap fragmentation
 
   if (server.hasArg("message"))
   {
     String inputText = server.arg("message");
-    strncpy(scrollText, inputText.c_str(), SCROLLING_TEXT_SIZE);
-    status += "Message updated: '" + inputText + "'\n"; // update the scroll text with the new message
+    updateScrollText(inputText.c_str());
+    status += "Message updated: '";
+    status += inputText;
+    status += "'\n"; // update the scroll text with the new message
   }
 
   if (server.hasArg("display"))
@@ -124,16 +207,20 @@ String parseInput()
     if (value == "blinkenlights")
     {
       mode = Mode::BLINKENLIGHTS;
+      updateDisplayMode();
       status += "Mode set to blinkenlights\n";
     }
     else if (value == "scroll" || value == "scrolling" || value == "scroll_text" || value == "scrolling_text")
     {
       mode = Mode::SCROLLING_TEXT;
+      updateDisplayMode();
       status += "Mode set to scrolling text\n";
     }
     else
     {
-      status += "Mode value '" + value + "' is invalid\n";
+      status += "Mode value '";
+      status += value;
+      status += "' is invalid\n";
     }
   }
 
@@ -150,11 +237,15 @@ String parseInput()
       const float FastestScrollMs = 2.0f;
       float expBase = pow(FastestScrollMs / SlowestScrollMs, 1.0f / 100.0f);
       scrollSpeedMs = constrain((int)SlowestScrollMs * pow(expBase, percent), (int)FastestScrollMs, (int)SlowestScrollMs);
-      status += "Scroll speed updated to " + String(scrollSpeedMs) + " ms (" + String(percent) + "%)\n"; // this maps 0-100% to 200ms (slow) to 10ms (fast)
+      char speedMsg[SPEED_MSG_BUFFER_SIZE];
+      snprintf(speedMsg, SPEED_MSG_BUFFER_SIZE, "Scroll speed updated to %d ms (%d%%)\n", scrollSpeedMs, percent);
+      status += speedMsg; // this maps 0-100% to 200ms (slow) to 10ms (fast)
     }
     else
     {
-      status += "Invalid scroll speed percent: " + String(percent) + "\n";
+      char errorMsg[ERROR_MSG_BUFFER_SIZE];
+      snprintf(errorMsg, ERROR_MSG_BUFFER_SIZE, "Invalid scroll speed percent: %d\n", percent);
+      status += errorMsg;
     }
   }
 
@@ -164,7 +255,9 @@ String parseInput()
     value.toLowerCase();
 
     mirrorVertical = value == "true" || value == "yes" || value == "on";
-    status += "Vertical mirror " + String(mirrorVertical ? "enabled" : "disabled") + "\n";
+    status += "Vertical mirror ";
+    status += mirrorVertical ? "enabled" : "disabled";
+    status += "\n";
   }
 
   if (server.hasArg("hmirror"))
@@ -173,7 +266,9 @@ String parseInput()
     value.toLowerCase();
 
     mirrorHorizontal = value == "true" || value == "yes" || value == "on";
-    status += "Horizontal mirror " + String(mirrorHorizontal ? "enabled" : "disabled") + "\n";
+    status += "Horizontal mirror ";
+    status += mirrorHorizontal ? "enabled" : "disabled";
+    status += "\n";
   }
 
   if (server.hasArg("restart"))
@@ -187,6 +282,19 @@ String parseInput()
 
 void handleRestRequest()
 {
+  // Log all requests
+  String queryString = server.uri();
+  if (server.args() > 0)
+  {
+    queryString += "?";
+    for (int i = 0; i < server.args(); i++)
+    {
+      if (i > 0) queryString += "&";
+      queryString += server.argName(i) + "=" + server.arg(i);
+    }
+  }
+  Serial.println("REST request: " + queryString);
+  
   String status = parseInput();
 
   if (status.isEmpty())
@@ -217,8 +325,58 @@ void handleRestRequest()
   server.send(200, "text/plain", status);
 }
 
+void showConnectionInfo()
+{
+  scrollingEnabled = false;
+  connectionDisplayState = SHOW_MDNS;
+  connectionDisplayStartMs = millis();
+  
+  // Use char arrays to avoid String concatenation
+  char mdnsMessage[50];
+  snprintf(mdnsMessage, sizeof(mdnsMessage), "%s.local    ", DEVICE_NAME);
+  updateScrollText(mdnsMessage);
+  scrollOffset = 0; // Don't scroll
+}
+
 void checkWifiStatus()
 {
+  // Handle connection display sequence
+  if (!scrollingEnabled)
+  {
+    unsigned long timeElapsed = millis() - connectionDisplayStartMs;
+    unsigned long timeoutDuration = (connectionDisplayState == SHOW_ERROR) ? ERROR_DISPLAY_DURATION_MS : CONNECTION_DISPLAY_DURATION_MS;
+    
+    if (timeElapsed > timeoutDuration)
+    {
+      if (connectionDisplayState == SHOW_MDNS)
+      {
+        // Transition from mDNS to IP address
+        connectionDisplayState = SHOW_IP;
+        connectionDisplayStartMs = millis();
+        
+        // Use char arrays to avoid String concatenation
+        char ipMessage[30];
+        snprintf(ipMessage, sizeof(ipMessage), "IP: %s    ", WiFi.localIP().toString().c_str());
+        updateScrollText(ipMessage);
+        scrollOffset = 0; // Don't scroll
+      }
+      else if (connectionDisplayState == SHOW_IP)
+      {
+        // Transition to normal scrolling mode
+        connectionDisplayState = NORMAL_MODE;
+        scrollingEnabled = true;
+        updateScrollText("This is block clock, or not?");
+        scrollOffset = IVG116_DISPLAY_WIDTH + 1; // Reset scroll position
+      }
+      else if (connectionDisplayState == SHOW_ERROR)
+      {
+        // Turn off display after showing error
+        connectionDisplayState = NORMAL_MODE;
+        displayEnabled = false;
+      }
+    }
+  }
+  
   if (millis() - wifiLastStatusCheckMs > WIFI_STATUS_PERIOD_MS)
   {
     wifiLastStatusCheckMs = millis();
@@ -252,13 +410,15 @@ void checkWifiStatus()
             rp2040.restart();
           }
           
-          strncpy(scrollText, "WiFi failing to reconnect", SCROLLING_TEXT_SIZE);
+          updateScrollText("WiFi failing to reconnect");
           return;
         }
       }
 
       Serial.println("\nReconnected to WiFi");
-      strncpy(scrollText, "WiFi reconnected", SCROLLING_TEXT_SIZE);
+      
+      // Show connection info when reconnected
+      showConnectionInfo();
       wifiReconnectCount++;
     }
 
@@ -266,82 +426,115 @@ void checkWifiStatus()
   }
 }
 
-void loadDisplayBuffer()
+void loadBlinkenLights()
 {
+  for (int col = 0; col < IVG116_DISPLAY_WIDTH; col++)
+  {
+    unsigned char colBits = 0b00000000;
+    for (int row = 0; row < IVG116_DISPLAY_HEIGHT; row++)
+    {
+      if (pixelsDelay[col][row]-- <= 0)
+      {
+        bool currentPixel = getPixel(col, row);
+        setPixel(col, row, !currentPixel);
+        pixelsDelay[col][row] = random(BLINKENLIGHTS_BASE_DELAY, BLINKENLIGHTS_BASE_DELAY * 2);
+      }
+
+      colBits |= getPixel(col, row) << row;
+    }
+
+    displayBuffer[col] = ~colBits;
+  }
+}
+
+void loadScrollingText()
+{
+  // Cache text length calculation 
+  if (cachedTextLength == 0) {
+    cachedTextLength = strlen(scrollText);
+  }
+  
+  // Always rebuild buffer (original behavior) - the optimization was wrong
+  // The display system expects this to run every frame
+  int bufIndex = 0;
+  int textIndex = 0;
+  bool endFlag = false;
+  bool foundEndingFlag = false;
+
+  // fills buffer with repeat copies of message
+  while (bufIndex < sizeof(displayBuffer))
+  {
+    if (!foundEndingFlag && scrollText[bufIndex / CHAR_SPACING] == '\0')
+    {
+      foundEndingFlag = true;
+      scrollTextSize = bufIndex / CHAR_SPACING + 1;
+    }
+
+    if (textIndex > scrollTextSize)
+    {
+      endFlag = true;
+      textIndex = -1;
+    }
+    else
+    {
+      endFlag = false;
+    }
+
+    // write char bits
+    int charBitmapIndex = scrollText[textIndex] - ASCII_SPACE_OFFSET;
+    if (charBitmapIndex > MAX_CHAR_INDEX || charBitmapIndex < MIN_CHAR_INDEX)
+    {
+      charBitmapIndex = 0;
+    }
+    for (int charOffset = 0; charOffset < CHAR_WIDTH; charOffset++)
+    {
+      if (endFlag)
+      {
+        displayBuffer[bufIndex + charOffset] = BLANK_COL;
+        continue;
+      }
+
+      displayBuffer[bufIndex + charOffset] = ~CHAR_BITMAPS[charBitmapIndex][charOffset];
+    }
+
+    // write space between characters
+    for (int gapIndex = 0; gapIndex < CHAR_SPACING - CHAR_WIDTH; gapIndex++)
+    {
+      displayBuffer[bufIndex + CHAR_WIDTH + gapIndex] = BLANK_COL;
+    }
+
+    bufIndex += CHAR_SPACING;
+    textIndex += 1;
+  }
+}
+
+void updateDisplayMode()
+{
+  DisplayModeFunction newMode = NULL;
+  
   switch (mode)
   {
-  case Mode::BLINKENLIGHTS:
-    for (int col = 0; col < IVG116_DISPLAY_WIDTH; col++)
-    {
-      unsigned char colBits = 0b00000000;
-      for (int row = 0; row < IVG116_DISPLAY_HEIGHT; row++)
-      {
-        if (pixelsDelay[col][row]-- <= 0)
-        {
-          pixelsActive[col][row] = !pixelsActive[col][row];
-          pixelsDelay[col][row] = random(BLINKENLIGHTS_BASE_DELAY, BLINKENLIGHTS_BASE_DELAY * 2);
-        }
+    case Mode::BLINKENLIGHTS:
+      newMode = loadBlinkenLights;
+      break;
+    case Mode::SCROLLING_TEXT:
+      newMode = loadScrollingText;
+      break;
+  }
+  
+  currentDisplayMode = newMode;
+}
 
-        colBits |= pixelsActive[col][row] << row;
-      }
-
-      displayBuffer[col] = ~colBits;
-    }
-    break;
-
-  case Mode::SCROLLING_TEXT:
-    int bufIndex = 0;
-    int textIndex = 0;
-    bool endFlag = false;
-    bool foundEndingFlag = false;
-
-    // fills buffer with repeat copies of message, TODO: optimize
-    // TODO: figure out how current impl avoids buffer skipping to avoid UTF-8 issues by skipping them
-    while (bufIndex < sizeof(displayBuffer))
-    {
-      if (!foundEndingFlag && scrollText[bufIndex / CHAR_SPACING] == '\0')
-      {
-        foundEndingFlag = true;
-        scrollTextSize = bufIndex / CHAR_SPACING + 1;
-      }
-
-      if (textIndex > scrollTextSize)
-      {
-        endFlag = true;
-        textIndex = -1;
-      }
-      else
-      {
-        endFlag = false;
-      }
-
-      // write char bits
-      int charBitmapIndex = scrollText[textIndex] - 32; //' ';
-      if (charBitmapIndex > 92 || charBitmapIndex < 0)
-      {
-        charBitmapIndex = 0;
-      }
-      for (int charOffset = 0; charOffset < CHAR_WIDTH; charOffset++)
-      {
-        if (endFlag)
-        {
-          displayBuffer[bufIndex + charOffset] = BLANK_COL;
-          continue;
-        }
-
-        displayBuffer[bufIndex + charOffset] = ~CHAR_BITMAPS[charBitmapIndex][charOffset];
-      }
-
-      // write space between characters
-      for (int gapIndex = 0; gapIndex < CHAR_SPACING - CHAR_WIDTH; gapIndex++)
-      {
-        displayBuffer[bufIndex + CHAR_WIDTH + gapIndex] = BLANK_COL;
-      }
-
-      bufIndex += CHAR_SPACING;
-      textIndex += 1;
-    }
-    break;
+void loadDisplayBuffer()
+{
+  if (currentDisplayMode == NULL)
+  {
+    updateDisplayMode();
+  }
+  
+  if (currentDisplayMode != NULL)
+  {
+    currentDisplayMode();
   }
 }
 
@@ -429,7 +622,7 @@ void writeDisplay()
 
   digitalWrite(BLANK, HIGH); // BLANKing pulse (left on until the next time through this function)
 
-  delayMicroseconds(25);
+  delayMicroseconds(DISPLAY_BLANK_DELAY_US);
 }
 
 void setup()
@@ -447,6 +640,12 @@ void setup()
 
   Serial.println("Setting up WiFi services");
 
+  // Enable display and show connecting message
+  displayEnabled = true;
+  scrollingEnabled = false;
+  updateScrollText("WiFi connecting... ");
+  scrollOffset = 0; // Don't scroll connecting message
+
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
   unsigned long wifiConnectStartMs = millis();
@@ -459,11 +658,21 @@ void setup()
   if (WiFi.status() == WL_CONNECTED)
   {
     Serial.printf("\nConnected to %s\nIP address: %s\n", WIFI_SSID, WiFi.localIP().toString().c_str());
+    
+    // Show connection info
+    showConnectionInfo();
   }
   else
   {
     Serial.println("\nWiFi failed to connect at boot");
-    strncpy(scrollText, "WiFi not connected", SCROLLING_TEXT_SIZE);
+    
+    // Show error message temporarily before turning off display
+    connectionDisplayState = SHOW_ERROR;
+    connectionDisplayStartMs = millis();
+    scrollingEnabled = false;
+    updateScrollText("WiFi connection failed    ");
+    scrollOffset = 0; // Don't scroll error message
+    // displayEnabled remains true to show error
   }
 
   if (MDNS.begin(DEVICE_NAME))
@@ -506,6 +715,12 @@ void setup()
                 } });
   ArduinoOTA.begin();
 
+  // Initialize display mode function pointer
+  updateDisplayMode();
+  
+  // Initialize text buffer (force initial build and ASCII filtering)
+  updateScrollText(scrollText); // Filter the default text through ASCII filter
+
   Serial.println("WiFi services setup complete");
 }
 
@@ -537,15 +752,16 @@ void setup1()
   pinMode(BLANK, OUTPUT_8MA);
 
   // initialize watchdog -- we really want to reboot if the display stops updating
-  watchdog_enable(8000, true); // max is 8333
+  watchdog_enable(WATCHDOG_TIMEOUT_MS, true); // max is WATCHDOG_MAX_MS
   watchdog_update();
 
   // initialize blinkenlights
   for (int col = 0; col < IVG116_DISPLAY_WIDTH; col++)
   {
+    pixelsActive[col] = 0; // Initialize to all off
     for (int row = 0; row < IVG116_DISPLAY_HEIGHT; row++)
     {
-      pixelsActive[col][row] = random(0, 2);
+      setPixel(col, row, random(0, 2));
       pixelsDelay[col][row] = random(BLINKENLIGHTS_BASE_DELAY * 4, BLINKENLIGHTS_BASE_DELAY * 8);
     }
   }
@@ -564,7 +780,7 @@ void loop1()
     {
       scrollOffset++;
 
-      // move back scroll position after writing out full display and the 3 char gap
+      // move back scroll position after writing out full display and the 3 char gap  
       if (scrollOffset >= scrollTextSize * CHAR_SPACING + 3 * CHAR_SPACING)
       {
         scrollOffset = CHAR_SPACING;
