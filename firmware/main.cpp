@@ -32,22 +32,23 @@
 #define EEPROM_WIFI_REBOOT_ADDR 0
 #define MAX_WIFI_RETRY_ATTEMPTS 3
 #define WIFI_CONNECT_TIMEOUT_MS 30 * 1000
+#define WIFI_STATUS_MESSAGE_DURATION 5 * 1000
 #define WIFI_STATUS_PERIOD_MS 60 * 1000
 #define WIFI_REBOOT_FLAG 0xAA
 
 // ASCII character mapping constants
-#define ASCII_SPACE_OFFSET 32    // ASCII space character
-#define MAX_CHAR_INDEX 92        // Maximum character index in bitmap array
-#define MIN_CHAR_INDEX 0         // Minimum valid character index
-#define ASCII_PRINTABLE_MIN 32   // First printable ASCII character (space)
-#define ASCII_PRINTABLE_MAX 126  // Last printable ASCII character (~)
+#define ASCII_SPACE_OFFSET 32   // ASCII space character
+#define MAX_CHAR_INDEX 92       // Maximum character index in bitmap array
+#define MIN_CHAR_INDEX 0        // Minimum valid character index
+#define ASCII_PRINTABLE_MIN 32  // First printable ASCII character (space)
+#define ASCII_PRINTABLE_MAX 126 // Last printable ASCII character (~)
 
 // Display timing constants
-#define DEFAULT_BRIGHTNESS 110   // Default microseconds per column
-#define MIN_BRIGHTNESS 130       // Minimum stable brightness value
-#define MAX_BRIGHTNESS 270       // Maximum brightness before flashy
-#define WATCHDOG_TIMEOUT_MS 8000 // Watchdog timeout in milliseconds
-#define WATCHDOG_MAX_MS 8333     // Maximum possible watchdog timeout
+#define DEFAULT_BRIGHTNESS 110    // Default microseconds per column
+#define MIN_BRIGHTNESS 130        // Minimum stable brightness value
+#define MAX_BRIGHTNESS 270        // Maximum brightness before flashy
+#define WATCHDOG_TIMEOUT_MS 8000  // Watchdog timeout in milliseconds
+#define WATCHDOG_MAX_MS 8333      // Maximum possible watchdog timeout
 #define DISPLAY_BLANK_DELAY_US 25 // Microseconds for blanking pulse
 
 // String buffer sizes
@@ -61,12 +62,6 @@ enum DeviceType
   GIPS_16_1
 };
 
-enum Mode
-{
-  BLINKENLIGHTS,
-  SCROLLING_TEXT
-};
-
 #ifdef IVG1_16_DEVICE
 DeviceType deviceType = IGV1_16;
 bool mirrorHorizontal = true;
@@ -76,13 +71,20 @@ DeviceType deviceType = GIPS_16_1;
 bool mirrorHorizontal = false;
 bool mirrorVertical = false;
 #endif
+enum DisplayMode
+{
+  BLINKENLIGHTS,
+  SCROLLING_TEXT
+};
+DisplayMode mode = SCROLLING_TEXT;
 bool displayEnabled = false;
-Mode mode = SCROLLING_TEXT;
 int displayOffset = 0;                                           // position of whatever is on the display, so this is the compass heading or text scroll
 unsigned char displayBuffer[SCROLLING_TEXT_SIZE * CHAR_SPACING]; // this is where the actual bitmap is loaded to be shown on the display
+typedef void (*DisplayModeFunction)();
+DisplayModeFunction currentDisplayMode = NULL;
 
 // blinkenlights stuff
-uint8_t pixelsActive[IVG116_DISPLAY_WIDTH];         // bit-packed bitmap for blinkenlights (1 bit per pixel)
+uint8_t pixelsActive[IVG116_DISPLAY_WIDTH];                             // bit-packed bitmap for blinkenlights (1 bit per pixel)
 unsigned long pixelsDelay[IVG116_DISPLAY_WIDTH][IVG116_DISPLAY_HEIGHT]; // this is the delay for the blinkenlights
 
 // scrolling text stuff
@@ -95,12 +97,12 @@ int scrollSpeedMs = 15;
 unsigned long lastUpdateMillis = 0;
 
 // Performance optimization: cache text buffer and length
-bool textBufferDirty = true;  // Flag to rebuild buffer only when text changes
-int cachedTextLength = 0;     // Cached length calculation
+bool textBufferDirty = true; // Flag to rebuild buffer only when text changes
+int cachedTextLength = 0;    // Cached length calculation
 
 // display driver stuff
-int scanLocation = -1; // keeps track of where we are in the cathode scanning sequence (-1 keeps it from scanning the first cycle)
-int brightness = DEFAULT_BRIGHTNESS;  // microseconds per column (range: MIN_BRIGHTNESS - MAX_BRIGHTNESS)
+int scanLocation = -1;               // keeps track of where we are in the cathode scanning sequence (-1 keeps it from scanning the first cycle)
+int brightness = DEFAULT_BRIGHTNESS; // microseconds per column (range: MIN_BRIGHTNESS - MAX_BRIGHTNESS)
 
 // wifi stuff
 WebServer server(80);
@@ -108,65 +110,85 @@ int wifiReconnectCount = 0;
 int wifiRetryCount = 0;
 bool wifiCausedReboot = false;
 unsigned long wifiLastStatusCheckMs = 0;
-
-// Connection display timing
-enum ConnectionDisplayState { SHOW_MDNS, SHOW_IP, SHOW_ERROR, NORMAL_MODE };
-ConnectionDisplayState connectionDisplayState = NORMAL_MODE;
-unsigned long connectionDisplayStartMs = 0;
-const unsigned long CONNECTION_DISPLAY_DURATION_MS = 3000;
-const unsigned long ERROR_DISPLAY_DURATION_MS = 5000;
-
-// Display mode function pointers
-typedef void (*DisplayModeFunction)();
-DisplayModeFunction currentDisplayMode = NULL;
+enum WifiStatusMessageState
+{
+  SHOW_MDNS,
+  SHOW_IP,
+  SHOW_ERROR,
+  NONE
+};
+WifiStatusMessageState wifiStatusMessageState = NONE;
+unsigned long wifiStatusMessageStartMs = 0;
 
 // Forward declarations
 void loadBlinkenLights();
 void loadScrollingText();
 void updateDisplayMode();
-void filterASCIIText(const char* input, char* output, int maxLength);
+void filterASCIIText(const char *input, char *output, int maxLength);
+void showStatusMessage(const char *message, WifiStatusMessageState state, bool enableDisplay = true, bool enableScrolling = false);
 
 // Bit manipulation helpers for pixelsActive
-inline bool getPixel(int col, int row) {
+inline bool getPixel(int col, int row)
+{
   return (pixelsActive[col] >> row) & 1;
 }
 
-inline void setPixel(int col, int row, bool value) {
-  if (value) {
+inline void setPixel(int col, int row, bool value)
+{
+  if (value)
+  {
     pixelsActive[col] |= (1 << row);
-  } else {
+  }
+  else
+  {
     pixelsActive[col] &= ~(1 << row);
   }
 }
 
 // Helper to filter out non-ASCII characters from text
-void filterASCIIText(const char* input, char* output, int maxLength) {
+void filterASCIIText(const char *input, char *output, int maxLength)
+{
   int inputPos = 0;
   int outputPos = 0;
-  
-  while (input[inputPos] != '\0' && outputPos < maxLength - 1) {
+
+  while (input[inputPos] != '\0' && outputPos < maxLength - 1)
+  {
     unsigned char c = (unsigned char)input[inputPos];
-    
+
     // Only keep printable ASCII characters
-    if (c >= ASCII_PRINTABLE_MIN && c <= ASCII_PRINTABLE_MAX) {
+    if (c >= ASCII_PRINTABLE_MIN && c <= ASCII_PRINTABLE_MAX)
+    {
       output[outputPos] = input[inputPos];
       outputPos++;
     }
     // Skip non-ASCII and non-printable characters
-    
+
     inputPos++;
   }
-  
+
   output[outputPos] = '\0'; // Null terminate
 }
 
 // Helper to update scroll text and invalidate caches
-void updateScrollText(const char* newText) {
+void updateScrollText(const char *newText)
+{
+  // Clear the entire buffer first to prevent old text remnants
+  memset(scrollText, 0, SCROLLING_TEXT_SIZE);
   filterASCIIText(newText, scrollText, SCROLLING_TEXT_SIZE);
-  textBufferDirty = true;  // Mark buffer for rebuild
-  cachedTextLength = 0;    // Invalidate cached length
+  textBufferDirty = true; // Mark buffer for rebuild
+  cachedTextLength = 0;   // Invalidate cached length
 }
 
+// Helper to show status messages with consistent formatting
+void showStatusMessage(const char *message, WifiStatusMessageState state, bool enableDisplay, bool enableScrolling)
+{
+  displayEnabled = enableDisplay;
+  scrollingEnabled = enableScrolling;
+  wifiStatusMessageState = state;
+  wifiStatusMessageStartMs = millis();
+  updateScrollText(message);
+  scrollOffset = 0; // Don't scroll status messages
+}
 
 String parseInput()
 {
@@ -206,13 +228,13 @@ String parseInput()
 
     if (value == "blinkenlights")
     {
-      mode = Mode::BLINKENLIGHTS;
+      mode = DisplayMode::BLINKENLIGHTS;
       updateDisplayMode();
       status += "Mode set to blinkenlights\n";
     }
     else if (value == "scroll" || value == "scrolling" || value == "scroll_text" || value == "scrolling_text")
     {
-      mode = Mode::SCROLLING_TEXT;
+      mode = DisplayMode::SCROLLING_TEXT;
       updateDisplayMode();
       status += "Mode set to scrolling text\n";
     }
@@ -271,10 +293,18 @@ String parseInput()
     status += "\n";
   }
 
-  if (server.hasArg("restart"))
+  if (server.hasArg("restart") || server.hasArg("reboot"))
   {
-    Serial.write("Restarting...\n");
-    rp2040.restart();
+    String value = server.hasArg("restart") ? server.arg("restart") : server.arg("reboot");
+    value.toLowerCase();
+
+    if (value == "true" || value == "yes" || value == "on")
+    {
+      Serial.write("Restarting...\n");
+      showStatusMessage("Rebooting...", NONE, true, false);
+      delay(WIFI_STATUS_MESSAGE_DURATION);
+      rp2040.restart();
+    }
   }
 
   return status;
@@ -289,12 +319,13 @@ void handleRestRequest()
     queryString += "?";
     for (int i = 0; i < server.args(); i++)
     {
-      if (i > 0) queryString += "&";
+      if (i > 0)
+        queryString += "&";
       queryString += server.argName(i) + "=" + server.arg(i);
     }
   }
   Serial.println("REST request: " + queryString);
-  
+
   String status = parseInput();
 
   if (status.isEmpty())
@@ -302,7 +333,7 @@ void handleRestRequest()
     status = "Settings:\n";
     status += " - Device Type: " + String(deviceType == IGV1_16 ? "IGV1-16" : "GIPS-16-1") + "\n";
     status += " - Display: " + String(displayEnabled ? "enabled" : "disabled") + "\n";
-    status += " - Mode: " + String(mode == Mode::BLINKENLIGHTS ? "blinkenlights" : "scrolling text") + "\n";
+    status += " - Mode: " + String(mode == DisplayMode::BLINKENLIGHTS ? "blinkenlights" : "scrolling text") + "\n";
     status += " - Scroll Speed: " + String(scrollSpeedPercent) + "% (" + String(scrollSpeedMs) + "ms)\n";
     status += " - Scroll Text: '" + String(scrollText) + "'\n";
     status += " - Horizontal Mirror: " + String(mirrorHorizontal ? "enabled" : "disabled") + "\n";
@@ -327,56 +358,40 @@ void handleRestRequest()
 
 void showConnectionInfo()
 {
-  scrollingEnabled = false;
-  connectionDisplayState = SHOW_MDNS;
-  connectionDisplayStartMs = millis();
-  
   // Use char arrays to avoid String concatenation
   char mdnsMessage[50];
   snprintf(mdnsMessage, sizeof(mdnsMessage), "%s.local    ", DEVICE_NAME);
-  updateScrollText(mdnsMessage);
-  scrollOffset = 0; // Don't scroll
+  showStatusMessage(mdnsMessage, SHOW_MDNS, true, false);
 }
 
 void checkWifiStatus()
 {
   // Handle connection display sequence
-  if (!scrollingEnabled)
+  if (wifiStatusMessageState != NONE && millis() - wifiStatusMessageStartMs > WIFI_STATUS_MESSAGE_DURATION)
   {
-    unsigned long timeElapsed = millis() - connectionDisplayStartMs;
-    unsigned long timeoutDuration = (connectionDisplayState == SHOW_ERROR) ? ERROR_DISPLAY_DURATION_MS : CONNECTION_DISPLAY_DURATION_MS;
-    
-    if (timeElapsed > timeoutDuration)
+    if (wifiStatusMessageState == SHOW_MDNS)
     {
-      if (connectionDisplayState == SHOW_MDNS)
-      {
-        // Transition from mDNS to IP address
-        connectionDisplayState = SHOW_IP;
-        connectionDisplayStartMs = millis();
-        
-        // Use char arrays to avoid String concatenation
-        char ipMessage[30];
-        snprintf(ipMessage, sizeof(ipMessage), "IP: %s    ", WiFi.localIP().toString().c_str());
-        updateScrollText(ipMessage);
-        scrollOffset = 0; // Don't scroll
-      }
-      else if (connectionDisplayState == SHOW_IP)
-      {
-        // Transition to normal scrolling mode
-        connectionDisplayState = NORMAL_MODE;
-        scrollingEnabled = true;
-        updateScrollText("This is block clock, or not?");
-        scrollOffset = IVG116_DISPLAY_WIDTH + 1; // Reset scroll position
-      }
-      else if (connectionDisplayState == SHOW_ERROR)
-      {
-        // Turn off display after showing error
-        connectionDisplayState = NORMAL_MODE;
-        displayEnabled = false;
-      }
+      // Transition from mDNS to IP address
+      char ipMessage[30];
+      snprintf(ipMessage, sizeof(ipMessage), "IP: %s    ", WiFi.localIP().toString().c_str());
+      showStatusMessage(ipMessage, SHOW_IP, true, false);
+    }
+    else if (wifiStatusMessageState == SHOW_IP)
+    {
+      // Transition to normal scrolling mode
+      wifiStatusMessageState = NONE;
+      scrollingEnabled = true;
+      updateScrollText("This is block clock, or not?");
+      scrollOffset = IVG116_DISPLAY_WIDTH + 1; // Reset scroll position
+    }
+    else if (wifiStatusMessageState == SHOW_ERROR)
+    {
+      // Turn off display after showing error
+      wifiStatusMessageState = NONE;
+      displayEnabled = false;
     }
   }
-  
+
   if (millis() - wifiLastStatusCheckMs > WIFI_STATUS_PERIOD_MS)
   {
     wifiLastStatusCheckMs = millis();
@@ -386,6 +401,9 @@ void checkWifiStatus()
       wifiRetryCount++;
 
       Serial.printf("WiFi disconnected, attempting to reconnect (attempt %d/%d)\n", wifiRetryCount, MAX_WIFI_RETRY_ATTEMPTS);
+
+      // Enable display and show connecting message
+      showStatusMessage("WiFi reconnecting", NONE, true, false);
 
       WiFi.disconnect();
       WiFi.begin(WIFI_SSID, WIFI_PASS);
@@ -400,23 +418,26 @@ void checkWifiStatus()
         {
           WiFi.disconnect();
           Serial.printf("\nWiFi reconnection attempt %d failed after 30 seconds\n", wifiRetryCount);
-          
+
           if (wifiRetryCount >= MAX_WIFI_RETRY_ATTEMPTS)
           {
             Serial.println("Maximum WiFi retry attempts exceeded, rebooting...");
-            
+            showStatusMessage("Rebooting...", NONE, true, false);
+            delay(WIFI_STATUS_MESSAGE_DURATION);
+
             EEPROM.write(EEPROM_WIFI_REBOOT_ADDR, WIFI_REBOOT_FLAG);
             EEPROM.commit();
             rp2040.restart();
           }
-          
-          updateScrollText("WiFi failing to reconnect");
+
+          // Show error message temporarily before turning off display
+          showStatusMessage("WiFi reconn failed", SHOW_ERROR, true, false);
           return;
         }
       }
 
       Serial.println("\nReconnected to WiFi");
-      
+
       // Show connection info when reconnected
       showConnectionInfo();
       wifiReconnectCount++;
@@ -449,11 +470,12 @@ void loadBlinkenLights()
 
 void loadScrollingText()
 {
-  // Cache text length calculation 
-  if (cachedTextLength == 0) {
+  // Cache text length calculation
+  if (cachedTextLength == 0)
+  {
     cachedTextLength = strlen(scrollText);
   }
-  
+
   // Always rebuild buffer (original behavior) - the optimization was wrong
   // The display system expects this to run every frame
   int bufIndex = 0;
@@ -511,17 +533,17 @@ void loadScrollingText()
 void updateDisplayMode()
 {
   DisplayModeFunction newMode = NULL;
-  
+
   switch (mode)
   {
-    case Mode::BLINKENLIGHTS:
-      newMode = loadBlinkenLights;
-      break;
-    case Mode::SCROLLING_TEXT:
-      newMode = loadScrollingText;
-      break;
+  case DisplayMode::BLINKENLIGHTS:
+    newMode = loadBlinkenLights;
+    break;
+  case DisplayMode::SCROLLING_TEXT:
+    newMode = loadScrollingText;
+    break;
   }
-  
+
   currentDisplayMode = newMode;
 }
 
@@ -531,7 +553,7 @@ void loadDisplayBuffer()
   {
     updateDisplayMode();
   }
-  
+
   if (currentDisplayMode != NULL)
   {
     currentDisplayMode();
@@ -543,11 +565,11 @@ void writeDisplay()
   digitalWrite(BLANK, LOW);
   delayMicroseconds(10);
 
-  if (mode == Mode::BLINKENLIGHTS)
+  if (mode == DisplayMode::BLINKENLIGHTS)
   {
     displayOffset = 0;
   }
-  else if (mode == Mode::SCROLLING_TEXT)
+  else if (mode == DisplayMode::SCROLLING_TEXT)
   {
     displayOffset = scrollOffset;
   }
@@ -636,15 +658,13 @@ void setup()
     EEPROM.write(EEPROM_WIFI_REBOOT_ADDR, 0x00);
     EEPROM.commit();
     Serial.println("Detected WiFi-caused reboot");
+
+    showStatusMessage("WiFi caused reboot", NONE, true, false);
+    delay(WIFI_STATUS_MESSAGE_DURATION);
   }
 
   Serial.println("Setting up WiFi services");
-
-  // Enable display and show connecting message
-  displayEnabled = true;
-  scrollingEnabled = false;
-  updateScrollText("WiFi connecting... ");
-  scrollOffset = 0; // Don't scroll connecting message
+  showStatusMessage("WiFi connecting... ", NONE, true, false);
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 
@@ -658,21 +678,12 @@ void setup()
   if (WiFi.status() == WL_CONNECTED)
   {
     Serial.printf("\nConnected to %s\nIP address: %s\n", WIFI_SSID, WiFi.localIP().toString().c_str());
-    
-    // Show connection info
     showConnectionInfo();
   }
   else
   {
     Serial.println("\nWiFi failed to connect at boot");
-    
-    // Show error message temporarily before turning off display
-    connectionDisplayState = SHOW_ERROR;
-    connectionDisplayStartMs = millis();
-    scrollingEnabled = false;
-    updateScrollText("WiFi connection failed    ");
-    scrollOffset = 0; // Don't scroll error message
-    // displayEnabled remains true to show error
+    showStatusMessage("WiFi conn failed", SHOW_ERROR, true, false);
   }
 
   if (MDNS.begin(DEVICE_NAME))
@@ -717,7 +728,7 @@ void setup()
 
   // Initialize display mode function pointer
   updateDisplayMode();
-  
+
   // Initialize text buffer (force initial build and ASCII filtering)
   updateScrollText(scrollText); // Filter the default text through ASCII filter
 
@@ -780,7 +791,7 @@ void loop1()
     {
       scrollOffset++;
 
-      // move back scroll position after writing out full display and the 3 char gap  
+      // move back scroll position after writing out full display and the 3 char gap
       if (scrollOffset >= scrollTextSize * CHAR_SPACING + 3 * CHAR_SPACING)
       {
         scrollOffset = CHAR_SPACING;
