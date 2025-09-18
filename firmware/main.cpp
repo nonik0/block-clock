@@ -155,6 +155,26 @@ void filterASCIIText(const char *input, char *output, int maxLength)
   {
     unsigned char c = (unsigned char)input[inputPos];
 
+    // Check for UTF-8 smart quotes and replace with ASCII equivalents
+    if (c == 0xE2 && input[inputPos + 1] == 0x80)
+    {
+      unsigned char thirdByte = (unsigned char)input[inputPos + 2];
+      if (thirdByte == 0x98 || thirdByte == 0x99) // U+2018 (') or U+2019 (')
+      {
+        output[outputPos] = '\''; // Replace with ASCII single quote
+        outputPos++;
+        inputPos += 3; // Skip the 3-byte UTF-8 sequence
+        continue;
+      }
+      else if (thirdByte == 0x9C || thirdByte == 0x9D) // U+201C (") or U+201D (")
+      {
+        output[outputPos] = '"'; // Replace with ASCII double quote
+        outputPos++;
+        inputPos += 3; // Skip the 3-byte UTF-8 sequence
+        continue;
+      }
+    }
+
     // Only keep printable ASCII characters
     if (c >= ASCII_PRINTABLE_MIN && c <= ASCII_PRINTABLE_MAX)
     {
